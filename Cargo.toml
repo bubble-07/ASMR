@@ -1,0 +1,19 @@
+[package]
+name = "ASMR"
+version = "0.1.0"
+authors = ["bubble-07 <spagrab@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+
+ndarray={version = "0.13.1", features = ["blas", "serde"] }
+ndarray-linalg={version = "0.12.1", features = ["openblas-src"]}
+rand="0.7.3"
+ndarray-rand="0.11.0"
+rand_distr="0.2.2"
+lapack-src = {version = "0.6", default-features = false, features = ["openblas"]}
+serde={version = "1.0.126", features = ["derive"] }
+log="0.4.11"
+tch="0.6.1"
