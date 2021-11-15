@@ -1,0 +1,6 @@
+pub const FLATTENED_MATRIX_DIM : i64 = 16;
+pub const NUM_FEAT_MAPS : i64 = 32;
+pub const SINGLETON_INJECTION_LAYERS : i64 = 20;
+pub const COMBINING_LAYERS : i64 = 40;
+pub const VALUE_EXTRACTION_LAYERS : i64 = 5;
+pub const POLICY_EXTRACTION_LAYERS : i64 = 5;
