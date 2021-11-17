@@ -10,13 +10,12 @@ pub fn injector_net<'a, T : Borrow<Path<'a>>>(vs : T) -> ConcatThenSequential {
     let vs = vs.borrow();
     let mut net = concat_then_seq();
     let two_matrix_dim = 2 * FLATTENED_MATRIX_DIM;
-    let mut net = net
-                 .add(nn::linear(
-                         vs / "init_linear",
-                         two_matrix_dim,
-                         NUM_FEAT_MAPS,
-                         Default::default()
-                      ));
+    net = net.add(nn::linear(
+                     vs / "init_linear",
+                     two_matrix_dim,
+                     NUM_FEAT_MAPS,
+                     Default::default()
+                  ));
     for i in 0..SINGLETON_INJECTION_LAYERS {
         net = net.add(linear_residual(
                       vs / format!("layer_{}", i),

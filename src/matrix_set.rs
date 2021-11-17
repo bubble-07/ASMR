@@ -5,6 +5,8 @@ extern crate rand;
 use rand::Rng;
 use rand::seq::SliceRandom;
 
+use tch::{kind, Tensor};
+
 use ndarray::*;
 use ndarray_linalg::*;
 use crate::array_utils::*;
@@ -16,6 +18,36 @@ pub struct MatrixSet {
 }
 
 impl MatrixSet {
+    pub fn get_flattened_tensors(&self) -> Vec<Tensor> {
+        let mut result = Vec::new();
+        for i in 0..self.size() {
+            let flattened_matrix = flatten_matrix(self.matrices[i].view());
+            let tensor = vector_to_tensor(flattened_matrix);
+            result.push(tensor);
+        }
+        result
+    }
+
+    pub fn size(&self) -> usize {
+        self.matrices.len()
+    }
+
+    pub fn get(&self, index : usize) -> ArrayView2<f32> {
+        self.matrices[index].view()
+    }
+
+    pub fn get_newest_matrix(&self) -> Array2<f32> {
+        self.matrices[self.size() - 1].clone()
+    }
+
+    pub fn add_matrix(self, matrix : Array2<f32>) -> MatrixSet {
+        let mut matrices = self.matrices;
+        matrices.push(matrix);
+        MatrixSet {
+            matrices
+        }
+    }
+
     pub fn shuffle<R : Rng + ?Sized>(&mut self, rng : &mut R) {
         self.matrices.shuffle(rng);
     }

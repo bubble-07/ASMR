@@ -1,6 +1,11 @@
-use tch::{nn, nn::Init, nn::Module, Tensor, nn::Path, nn::Sequential};
+use tch::{no_grad_guard, nn, nn::Init, nn::Module, Tensor, nn::Path, nn::Sequential};
 use crate::network::*;
 use crate::neural_utils::*;
+use crate::game_state::*;
+use crate::array_utils::*;
+
+use rand::Rng;
+use rand::seq::SliceRandom;
 
 ///M : matrix (flattened) dims
 ///F : feature dims
@@ -15,6 +20,12 @@ pub struct NetworkConfig {
     left_policy_extraction_net : ConcatThenSequential,
     ///F (combined) x F (single) -> 2F
     right_policy_extraction_net : ConcatThenSequential
+}
+
+struct RolloutState {
+    game_state : GameState,
+    single_embeddings : Vec<Tensor>,
+    combined_embedding : Tensor
 }
 
 impl NetworkConfig {
@@ -32,6 +43,56 @@ impl NetworkConfig {
             right_policy_extraction_net
         }
     }
+    fn start_rollout(&self, game_state : GameState) -> RolloutState {
+        let guard = no_grad_guard();
+
+        let flattened_matrix_set = game_state.get_flattened_matrix_set();
+        let flattened_matrix_target = game_state.get_flattened_matrix_target();
+
+        let single_embeddings = self.get_single_embeddings(&flattened_matrix_set, &flattened_matrix_target);
+        let combined_embedding = self.combine_embeddings(&single_embeddings);
+
+        RolloutState {
+            game_state,
+            single_embeddings,
+            combined_embedding
+        }
+    }
+
+    fn step_rollout<R : Rng + ?Sized>(&self, rollout_state : RolloutState, rng : &mut R) -> RolloutState {
+        let guard = no_grad_guard();
+
+        let mut single_embeddings = rollout_state.single_embeddings;
+        let mut combined_embedding = rollout_state.combined_embedding;
+
+        let policy_tensor = self.get_policy(&single_embeddings, &combined_embedding);
+        let policy_mat = tensor_to_matrix(&policy_tensor);
+        let (ind_one, ind_two) = sample_index_pair(policy_mat.view(), rng);
+        let game_state = rollout_state.game_state.perform_move(ind_one, ind_two);
+        
+        let new_mat = game_state.get_newest_matrix();
+        let new_tensor = matrix_to_tensor(new_mat.view());
+        combined_embedding = self.combiner_net.forward(&combined_embedding, &new_tensor);
+
+        single_embeddings.push(new_tensor);
+
+        RolloutState {
+            game_state,
+            single_embeddings,
+            combined_embedding
+        }
+    }
+
+    pub fn perform_rollout<R : Rng + ?Sized>(&self, game_state : GameState, rng : &mut R) -> f32 {
+        let turns = game_state.get_remaining_turns();
+        let mut rollout_state = self.start_rollout(game_state);
+        for _ in 0..turns {
+            rollout_state = self.step_rollout(rollout_state, rng);
+        }
+        let value = rollout_state.game_state.get_distance();
+        value
+    }
+
     ///Given embeddings of dimension F, yields a combined embedding of dimension F
     fn combine_embeddings(&self, embeddings : &[Tensor]) -> Tensor {
         let k = embeddings.len();
@@ -53,12 +114,8 @@ impl NetworkConfig {
         }
     }
 
-    ///Given a collection of K [flattened] matrices (dimension M), and a flattened matrix target
-    ///(dimension M), yields a computed (Value [Scalar], Policy [Matrix of dimension KxK]) pair
-    pub fn get_value_and_policy(&self, flattened_matrix_set : &[Tensor], flattened_matrix_target : &Tensor) ->
-                 (Tensor, Tensor) {
-
-        //First, compute the embeddings for every input matrix
+    fn get_single_embeddings(&self, flattened_matrix_set : &[Tensor], flattened_matrix_target : &Tensor)
+                            -> Vec<Tensor> {
         let k = flattened_matrix_set.len();
         let mut single_embeddings = Vec::new();
         for i in 0..k {
@@ -66,13 +123,11 @@ impl NetworkConfig {
             let embedding = self.injector_net.forward(flattened_matrix, flattened_matrix_target);
             single_embeddings.push(embedding);
         }
-        //Then, combine embeddings repeatedly until there's only one "master" embedding for the
-        //entire collection of matrices
-        let combined_embedding = self.combine_embeddings(&single_embeddings);
+        single_embeddings
+    }
 
-        //Now that we have the combined embedding, extract the value
-        let value = self.value_extraction_net.forward(&combined_embedding);
-
+    fn get_policy(&self, single_embeddings : &[Tensor], combined_embedding : &Tensor) -> Tensor {
+        let k = single_embeddings.len();
         //Compute left and right policy vectors
         let mut left_policy_vecs = Vec::new();
         let mut right_policy_vecs = Vec::new();
@@ -88,6 +143,27 @@ impl NetworkConfig {
         let left_policy_mat = Tensor::stack(&left_policy_vecs, 0);
         let right_policy_mat = Tensor::stack(&right_policy_vecs, 0);
         let policy_mat = left_policy_mat.dot(&right_policy_mat.tr());
+
+        //TODO: Need to map the policy matrix through a softmax function
+        policy_mat
+    }
+
+    ///Given a collection of K [flattened] matrices (dimension M), and a flattened matrix target
+    ///(dimension M), yields a computed (Value [Scalar], Policy [Matrix of dimension KxK]) pair
+    pub fn get_value_and_policy(&self, flattened_matrix_set : &[Tensor], flattened_matrix_target : &Tensor) ->
+                 (Tensor, Tensor) {
+
+        //First, compute the embeddings for every input matrix
+        let single_embeddings = self.get_single_embeddings(flattened_matrix_set, flattened_matrix_target);
+
+        //Then, combine embeddings repeatedly until there's only one "master" embedding for the
+        //entire collection of matrices
+        let combined_embedding = self.combine_embeddings(&single_embeddings);
+
+        //Now that we have the combined embedding, extract the value
+        let value = self.value_extraction_net.forward(&combined_embedding);
+
+        let policy_mat = self.get_policy(&single_embeddings, &combined_embedding);
 
         (value, policy_mat)
     }
