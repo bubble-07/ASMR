@@ -44,27 +44,6 @@ pub fn combiner_net<'a, T : Borrow<Path<'a>>>(vs : T) -> ConcatThenSequential {
     net
 }
 
-///Module that takes a descriptor of NUM_FEAT_MAPS size 
-///and a descriptor for a target of NUM_FEAT_MAPS size to a 
-///scalar value representing the "value" of the state that the descriptor represents
-///with respect to the given target
-pub fn value_extraction_net<'a, T : Borrow<Path<'a>>>(vs : T) -> Sequential {
-    let vs = vs.borrow();
-    let mut net = nn::seq();
-    for i in 0..VALUE_EXTRACTION_LAYERS {
-        net = net.add(linear_residual(
-                      vs / format!("layer_{}", i),
-                      NUM_FEAT_MAPS));
-    }
-    net = net.add(nn::linear(
-                      vs / format!("final_linear"),
-                      NUM_FEAT_MAPS,
-                      1,
-                      Default::default()
-                 ));
-    net
-}
-
 ///BiModule that takes a descriptor of NUM_FEAT_MAPS size
 ///representing the combined state of a collection of matrices
 ///and a descriptor of NUM_FEAT_MAPS size representing the

@@ -3,6 +3,7 @@ use crate::network::*;
 use crate::neural_utils::*;
 use crate::game_state::*;
 use crate::array_utils::*;
+use ndarray::*;
 
 use rand::Rng;
 use rand::seq::SliceRandom;
@@ -14,36 +15,43 @@ pub struct NetworkConfig {
     injector_net : ConcatThenSequential,
     ///F x F -> F (combined)
     combiner_net : ConcatThenSequential,
-    ///F -> Scalar
-    value_extraction_net : Sequential,
     ///F (combined) x F (single) -> 2F
     left_policy_extraction_net : ConcatThenSequential,
     ///F (combined) x F (single) -> 2F
     right_policy_extraction_net : ConcatThenSequential
 }
 
-struct RolloutState {
+pub struct RolloutState {
     game_state : GameState,
     single_embeddings : Vec<Tensor>,
     combined_embedding : Tensor
+}
+
+impl Clone for RolloutState {
+    fn clone(&self) -> Self {
+        let single_embeddings = self.single_embeddings.iter().map(|x| x.copy()).collect();
+        RolloutState {
+            game_state : self.game_state.clone(),
+            single_embeddings,
+            combined_embedding : self.combined_embedding.copy()
+        }
+    }
 }
 
 impl NetworkConfig {
     pub fn new(vs : &nn::Path) -> NetworkConfig {
         let injector_net = injector_net(vs / "injector");
         let combiner_net = combiner_net(vs / "combiner");
-        let value_extraction_net = value_extraction_net(vs / "value_extractor");
         let left_policy_extraction_net = half_policy_extraction_net(vs / "left_policy_vector_supplier");
         let right_policy_extraction_net = half_policy_extraction_net(vs / "right_policy_vector_supplier");
         NetworkConfig {
             injector_net,
             combiner_net,
-            value_extraction_net,
             left_policy_extraction_net,
             right_policy_extraction_net
         }
     }
-    fn start_rollout(&self, game_state : GameState) -> RolloutState {
+    pub fn start_rollout(&self, game_state : GameState) -> RolloutState {
         let guard = no_grad_guard();
 
         let flattened_matrix_set = game_state.get_flattened_matrix_set();
@@ -59,17 +67,14 @@ impl NetworkConfig {
         }
     }
 
-    fn step_rollout<R : Rng + ?Sized>(&self, rollout_state : RolloutState, rng : &mut R) -> RolloutState {
+    pub fn manual_step_rollout(&self, rollout_state : RolloutState, new_mat : Array2<f32>) -> RolloutState {
         let guard = no_grad_guard();
 
         let mut single_embeddings = rollout_state.single_embeddings;
         let mut combined_embedding = rollout_state.combined_embedding;
-
-        let policy_tensor = self.get_policy(&single_embeddings, &combined_embedding);
-        let policy_mat = tensor_to_matrix(&policy_tensor);
-        let (ind_one, ind_two) = sample_index_pair(policy_mat.view(), rng);
-        let game_state = rollout_state.game_state.perform_move(ind_one, ind_two);
-        
+         
+        let game_state = rollout_state.game_state.add_matrix(new_mat);
+       
         let new_mat = game_state.get_newest_matrix();
         let new_tensor = matrix_to_tensor(new_mat.view());
         combined_embedding = self.combiner_net.forward(&combined_embedding, &new_tensor);
@@ -83,14 +88,38 @@ impl NetworkConfig {
         }
     }
 
-    pub fn perform_rollout<R : Rng + ?Sized>(&self, game_state : GameState, rng : &mut R) -> f32 {
-        let turns = game_state.get_remaining_turns();
-        let mut rollout_state = self.start_rollout(game_state);
+    fn step_rollout<R : Rng + ?Sized>(&self, rollout_state : RolloutState, rng : &mut R) -> RolloutState {
+        let guard = no_grad_guard();
+
+        let single_embeddings = &rollout_state.single_embeddings;
+        let combined_embedding = &rollout_state.combined_embedding;
+
+        let policy_tensor = self.get_policy(&single_embeddings, &combined_embedding);
+        let policy_mat = tensor_to_matrix(&policy_tensor);
+        let (ind_one, ind_two) = sample_index_pair(policy_mat.view(), rng);
+
+        let game_state = &rollout_state.game_state;
+
+        let mat_one = game_state.get_matrix(ind_one);
+        let mat_two = game_state.get_matrix(ind_two);
+
+        let new_mat = mat_one.dot(&mat_two);
+        
+        self.manual_step_rollout(rollout_state, new_mat)
+    }
+    
+    pub fn complete_rollout<R : Rng + ?Sized>(&self, mut rollout_state : RolloutState, rng : &mut R) -> f32 {
+        let turns = rollout_state.game_state.get_remaining_turns();
         for _ in 0..turns {
             rollout_state = self.step_rollout(rollout_state, rng);
         }
         let value = rollout_state.game_state.get_distance();
         value
+    }
+
+    pub fn perform_rollout<R : Rng + ?Sized>(&self, game_state : GameState, rng : &mut R) -> f32 {
+        let rollout_state = self.start_rollout(game_state);
+        self.complete_rollout(rollout_state, rng)
     }
 
     ///Given embeddings of dimension F, yields a combined embedding of dimension F
@@ -149,9 +178,9 @@ impl NetworkConfig {
     }
 
     ///Given a collection of K [flattened] matrices (dimension M), and a flattened matrix target
-    ///(dimension M), yields a computed (Value [Scalar], Policy [Matrix of dimension KxK]) pair
-    pub fn get_value_and_policy(&self, flattened_matrix_set : &[Tensor], flattened_matrix_target : &Tensor) ->
-                 (Tensor, Tensor) {
+    ///(dimension M), yields a computed Policy [Matrix of dimension KxK] tensor
+    pub fn get_policy_from_scratch(&self, flattened_matrix_set : &[Tensor], flattened_matrix_target : &Tensor) ->
+                 Tensor {
 
         //First, compute the embeddings for every input matrix
         let single_embeddings = self.get_single_embeddings(flattened_matrix_set, flattened_matrix_target);
@@ -160,11 +189,8 @@ impl NetworkConfig {
         //entire collection of matrices
         let combined_embedding = self.combine_embeddings(&single_embeddings);
 
-        //Now that we have the combined embedding, extract the value
-        let value = self.value_extraction_net.forward(&combined_embedding);
-
         let policy_mat = self.get_policy(&single_embeddings, &combined_embedding);
 
-        (value, policy_mat)
+        policy_mat
     }
 }

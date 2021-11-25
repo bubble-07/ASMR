@@ -7,11 +7,12 @@ extern crate ndarray_linalg;
 
 use ndarray::*;
 
+#[derive(Clone)]
 pub struct GameState {
-    matrix_set : MatrixSet,
-    target : Array2<f32>,
-    remaining_turns : usize,
-    distance : f32
+    pub matrix_set : MatrixSet,
+    pub target : Array2<f32>,
+    pub remaining_turns : usize,
+    pub distance : f32
 }
 
 impl GameState {
@@ -25,6 +26,21 @@ impl GameState {
         GameState {
             matrix_set,
             target,
+            remaining_turns,
+            distance
+        }
+    }
+
+    pub fn add_matrix(self, matrix : Array2<f32>) -> Self {
+        let matrix_distance = sq_frob_dist(matrix.view(), self.target.view());
+
+        let matrix_set = self.matrix_set.add_matrix(matrix);
+        let distance = self.distance.min(matrix_distance);
+
+        let remaining_turns = self.remaining_turns - 1;
+        GameState {
+            matrix_set,
+            target : self.target,
             remaining_turns,
             distance
         }
@@ -45,7 +61,7 @@ impl GameState {
     pub fn get_matrix_set(&self) -> &MatrixSet {
         &self.matrix_set
     }
-    pub fn get_newest_matrix(&self) -> Array2<f32> {
+    pub fn get_newest_matrix(&self) -> ArrayView2<f32> {
         self.matrix_set.get_newest_matrix()
     }
     pub fn get_num_matrices(&self) -> usize {
@@ -57,19 +73,11 @@ impl GameState {
     pub fn get_distance(&self) -> f32 {
         self.distance
     }
+    pub fn get_matrix(&self, ind : usize) -> ArrayView2<f32> {
+        self.matrix_set.get(ind)
+    }
     pub fn perform_move(self, ind_one : usize, ind_two : usize) -> Self {
         let matrix = self.matrix_set.get(ind_one).dot(&self.matrix_set.get(ind_two));
-        let matrix_distance = sq_frob_dist(matrix.view(), self.target.view());
-
-        let matrix_set = self.matrix_set.add_matrix(matrix);
-        let distance = self.distance.min(matrix_distance);
-
-        let remaining_turns = self.remaining_turns - 1;
-        GameState {
-            matrix_set,
-            target : self.target,
-            remaining_turns,
-            distance
-        }
+        self.add_matrix(matrix)
     }
 }

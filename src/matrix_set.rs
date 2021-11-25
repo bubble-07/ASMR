@@ -36,8 +36,8 @@ impl MatrixSet {
         self.matrices[index].view()
     }
 
-    pub fn get_newest_matrix(&self) -> Array2<f32> {
-        self.matrices[self.size() - 1].clone()
+    pub fn get_newest_matrix(&self) -> ArrayView2<f32> {
+        self.matrices[self.size() - 1].view()
     }
 
     pub fn add_matrix(self, matrix : Array2<f32>) -> MatrixSet {

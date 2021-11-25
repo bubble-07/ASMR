@@ -3,6 +3,8 @@
 #![allow(unused_imports)]
 #![allow(unused_parens)]
 
+mod game_tree;
+mod normal_inverse_chi_squared;
 mod array_utils;
 mod matrix_set;
 mod vector_set;
