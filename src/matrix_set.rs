@@ -17,6 +17,9 @@ pub struct MatrixSet {
 }
 
 impl MatrixSet {
+    pub fn get_flattened_vectors(&self) -> Vec<ArrayView1<f32>> {
+        self.matrices.iter().map(|x| flatten_matrix(x.view())).collect()
+    }
     pub fn get_flattened_tensors(&self) -> Vec<Tensor> {
         let mut result = Vec::new();
         for i in 0..self.size() {

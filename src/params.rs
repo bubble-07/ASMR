@@ -28,7 +28,9 @@ pub struct Params {
     ///_actually_ required (>= 1) to reach the target matrix
     pub success_probability_ground_truth_num_moves : f64,
     ///Upper-bound on the number of turns allowed in the game
-    pub max_num_turns : usize
+    pub max_num_turns : usize,
+    ///Number of monte-carlo-tree-search updates per game
+    pub iters_per_game : usize
 }
 
 impl Params {

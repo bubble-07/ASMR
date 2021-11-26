@@ -3,6 +3,7 @@
 #![allow(unused_imports)]
 #![allow(unused_parens)]
 
+mod training_example;
 mod game_tree;
 mod normal_inverse_chi_squared;
 mod array_utils;
