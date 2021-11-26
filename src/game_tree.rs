@@ -44,6 +44,28 @@ pub struct GameTreeTraverser {
 
 
 impl GameTree {
+    pub fn new(init_game_state : GameState) -> GameTree {
+        let mut nodes = Vec::new();
+
+        let init_distance = init_game_state.distance;
+
+        //Let the initial game-state just have an observation of the initial distance.
+        //We don't really care what our initialization looks like, tbh, so long as it provides
+        //a valid prior distribution to propagate down the tree.
+        let game_end_distance_distribution = NormalInverseChiSquared::Uninformative.update(init_distance as f64);
+
+        let init_node = GameTreeNode {
+            maybe_expanded_edges : Option::None,
+            current_distance : init_game_state.distance,
+            game_end_distance_distribution
+        };
+        nodes.push(init_node);
+        GameTree {
+            nodes,
+            init_game_state
+        }
+    }
+
     pub fn render_dotfile(&self) -> String {
         let traverser = self.traverse_from_root();
         let content = self.render_dotfile_recursive(traverser);
@@ -75,7 +97,7 @@ impl GameTree {
         result
     }
 
-    pub fn extract_training_examples<R : Rng + ?Sized>(&self) -> TrainingExamples {
+    pub fn extract_training_examples(&self) -> TrainingExamples {
         let flattened_matrix_target = flatten_matrix(self.init_game_state.target.view()).to_owned();
 
         let mut result = TrainingExamples {
