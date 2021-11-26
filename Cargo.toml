@@ -8,13 +8,13 @@ edition = "2018"
 
 [dependencies]
 
-ndarray={version = "0.13.1", features = ["blas", "serde"] }
-ndarray-linalg={version = "0.12.1", features = ["openblas-src"]}
+ndarray={version = "0.15.4", features = ["blas", "serde"] }
+ndarray-linalg={version = "0.14.1", features = ["openblas-static"]}
 rand="0.8.4"
 ndarray-rand="0.14.0"
 rand_distr="0.4.2"
 rand_core="0.6.3"
-lapack-src = {version = "0.6", default-features = false, features = ["openblas"]}
+lapack-src = {version = "0.8", default-features = false, features = ["openblas"]}
 serde={version = "1.0.126", features = ["derive"] }
 log="0.4.11"
 tch="0.6.1"

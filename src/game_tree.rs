@@ -131,9 +131,6 @@ impl GameTreeTraverser {
         let parent_rollout_state = network_config.start_rollout(self.game_state.clone());
 
         let current_node_index = self.current_node_index();
-        let current_node = &game_tree.nodes[current_node_index];
-
-        let current_game_end_distance_distribution = current_node.game_end_distance_distribution;
 
         let current_set_size = self.game_state.get_num_matrices();
         let current_distance = self.game_state.get_distance();

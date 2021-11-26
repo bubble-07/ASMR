@@ -6,31 +6,31 @@ use crate::neural_utils::*;
 ///BiModule that takes a flattened matrix (dimension FLATTENED_MATRIX_DIM)
 ///for an input and a flattened matrix (dimension FLATTENED_MATRIX_DIM) for a target
 ///to descriptors of NUM_FEAT_MAPS size.
-pub fn injector_net<'a, T : Borrow<Path<'a>>>(vs : T) -> ConcatThenSequential {
+pub fn injector_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs : T) -> ConcatThenSequential {
     let vs = vs.borrow();
     let mut net = concat_then_seq();
-    let two_matrix_dim = 2 * FLATTENED_MATRIX_DIM;
+    let two_matrix_dim = 2 * params.get_flattened_matrix_dim();
     net = net.add(nn::linear(
                      vs / "init_linear",
                      two_matrix_dim,
-                     NUM_FEAT_MAPS,
+                     params.num_feat_maps,
                      Default::default()
                   ));
-    for i in 0..SINGLETON_INJECTION_LAYERS {
+    for i in 0..params.singleton_injection_layers {
         net = net.add(linear_residual(
                       vs / format!("layer_{}", i),
-                      NUM_FEAT_MAPS));
+                      params.num_feat_maps));
     } 
     net
 }
 
 ///BiModule that takes two descriptors of NUM_FEAT_MAPS size
 ///and yields a combined descriptor of NUM_FEAT_MAPS size
-pub fn combiner_net<'a, T : Borrow<Path<'a>>>(vs : T) -> ConcatThenSequential {
+pub fn combiner_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs : T) -> ConcatThenSequential {
     let vs = vs.borrow();
     let mut net = concat_then_seq();
-    let feats = NUM_FEAT_MAPS * 2;
-    for i in 0..COMBINING_LAYERS {
+    let feats = params.num_feat_maps * 2;
+    for i in 0..params.combining_layers {
         net = net.add(linear_residual(
                       vs / format!("layer_{}", i),
                       feats));
@@ -38,7 +38,7 @@ pub fn combiner_net<'a, T : Borrow<Path<'a>>>(vs : T) -> ConcatThenSequential {
     net = net.add(nn::linear(
                       vs / format!("final_linear"),
                       feats,
-                      NUM_FEAT_MAPS,
+                      params.num_feat_maps,
                       Default::default()
                  ));
     net
@@ -51,11 +51,11 @@ pub fn combiner_net<'a, T : Borrow<Path<'a>>>(vs : T) -> ConcatThenSequential {
 ///of NUM_FEAT_MAPS * 2 size which will be dot-producted
 ///with the corresponding ("left"/"right") policy vector to yield
 ///a scalar policy value representing the "goodness" of the combination
-pub fn half_policy_extraction_net<'a, T : Borrow<Path<'a>>>(vs : T) -> ConcatThenSequential {
+pub fn half_policy_extraction_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs : T) -> ConcatThenSequential {
     let vs = vs.borrow();
     let mut net = concat_then_seq();
-    let feats = NUM_FEAT_MAPS * 2;
-    for i in 0..POLICY_EXTRACTION_LAYERS {
+    let feats = params.num_feat_maps * 2;
+    for i in 0..params.policy_extraction_layers {
         net = net.add(linear_residual(
                       vs / format!("layer_{}", i),
                       feats));

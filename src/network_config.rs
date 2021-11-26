@@ -3,6 +3,7 @@ use crate::network::*;
 use crate::neural_utils::*;
 use crate::game_state::*;
 use crate::array_utils::*;
+use crate::params::*;
 use ndarray::*;
 
 use rand::Rng;
@@ -39,11 +40,11 @@ impl Clone for RolloutState {
 }
 
 impl NetworkConfig {
-    pub fn new(vs : &nn::Path) -> NetworkConfig {
-        let injector_net = injector_net(vs / "injector");
-        let combiner_net = combiner_net(vs / "combiner");
-        let left_policy_extraction_net = half_policy_extraction_net(vs / "left_policy_vector_supplier");
-        let right_policy_extraction_net = half_policy_extraction_net(vs / "right_policy_vector_supplier");
+    pub fn new(params : &Params, vs : &nn::Path) -> NetworkConfig {
+        let injector_net = injector_net(params, vs / "injector");
+        let combiner_net = combiner_net(params, vs / "combiner");
+        let left_policy_extraction_net = half_policy_extraction_net(params, vs / "left_policy_vector_supplier");
+        let right_policy_extraction_net = half_policy_extraction_net(params, vs / "right_policy_vector_supplier");
         NetworkConfig {
             injector_net,
             combiner_net,
@@ -52,7 +53,7 @@ impl NetworkConfig {
         }
     }
     pub fn start_rollout(&self, game_state : GameState) -> RolloutState {
-        let guard = no_grad_guard();
+        let _guard = no_grad_guard();
 
         let flattened_matrix_set = game_state.get_flattened_matrix_set();
         let flattened_matrix_target = game_state.get_flattened_matrix_target();
@@ -68,7 +69,7 @@ impl NetworkConfig {
     }
 
     pub fn manual_step_rollout(&self, rollout_state : RolloutState, new_mat : Array2<f32>) -> RolloutState {
-        let guard = no_grad_guard();
+        let _guard = no_grad_guard();
 
         let mut single_embeddings = rollout_state.single_embeddings;
         let mut combined_embedding = rollout_state.combined_embedding;
@@ -89,7 +90,7 @@ impl NetworkConfig {
     }
 
     fn step_rollout<R : Rng + ?Sized>(&self, rollout_state : RolloutState, rng : &mut R) -> RolloutState {
-        let guard = no_grad_guard();
+        let _guard = no_grad_guard();
 
         let single_embeddings = &rollout_state.single_embeddings;
         let combined_embedding = &rollout_state.combined_embedding;

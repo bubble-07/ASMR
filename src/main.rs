@@ -7,7 +7,6 @@ mod game_tree;
 mod normal_inverse_chi_squared;
 mod array_utils;
 mod matrix_set;
-mod vector_set;
 mod params;
 mod neural_utils;
 mod network;
