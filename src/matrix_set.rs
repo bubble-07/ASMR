@@ -10,10 +10,17 @@ use tch::{kind, Tensor};
 use ndarray::*;
 use ndarray_linalg::*;
 use crate::array_utils::*;
+use std::fmt;
 
 #[derive(Clone)]
 pub struct MatrixSet {
     pub matrices : Vec<Array2<f32>>
+}
+
+impl fmt::Display for MatrixSet {
+    fn fmt(&self, f : &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", &self.matrices)
+    }
 }
 
 impl MatrixSet {

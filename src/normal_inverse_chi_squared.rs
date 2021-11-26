@@ -1,6 +1,7 @@
 use rand::Rng;
 use rand_core::RngCore;
 use rand_distr::{Distribution, Gamma, Normal};
+use std::fmt;
 
 #[derive(Clone, Copy)]
 pub enum NormalInverseChiSquared {
@@ -16,6 +17,29 @@ pub struct NonDegenerateNormalInverseChiSquared {
     pub mean_observations : usize,
     pub variance_observations : usize,
     pub variance : f64
+}
+
+impl fmt::Display for NormalInverseChiSquared {
+    fn fmt(&self, f : &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (&self) {
+            NormalInverseChiSquared::Uninformative => {
+                write!(f, "Undefined")
+            },
+            NormalInverseChiSquared::NonDegenerate(distr) => {
+                write!(f, "{}", distr)
+            },
+            NormalInverseChiSquared::Certain(val) => {
+                write!(f, "Certain: {}", val)
+            }
+        }
+    }
+}
+
+impl fmt::Display for NonDegenerateNormalInverseChiSquared {
+    fn fmt(&self, f : &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "mean: {} mean_obs: {} variance: {} variance_obs: {}", 
+                   self.mean, self.mean_observations, self.variance, self.variance_observations)
+    }
 }
 
 impl NormalInverseChiSquared {

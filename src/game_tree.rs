@@ -9,6 +9,7 @@ use crate::array_utils::*;
 use crate::game_state::*;
 use crate::normal_inverse_chi_squared::*;
 use crate::training_example::*;
+use std::fmt;
 
 use rand::Rng;
 
@@ -41,7 +42,39 @@ pub struct GameTreeTraverser {
     pub game_state : GameState
 }
 
+
 impl GameTree {
+    pub fn render_dotfile(&self) -> String {
+        let traverser = self.traverse_from_root();
+        let content = self.render_dotfile_recursive(traverser);
+        format!("digraph gametree {{\n {} \n }}", content)
+    }
+
+    fn render_dotfile_recursive(&self, traverser : GameTreeTraverser) -> String {
+        let current_node_index = traverser.current_node_index();
+
+        let label_str = if (current_node_index == 0) {
+            format!("{}", self.init_game_state)
+        } else {
+            let node = traverser.current_node(self);
+            format!("{}", node)
+        };
+
+        let mut result = format!("{} [label=\"{}\"];\n", current_node_index, label_str);
+
+        let mut child_tuples = traverser.get_child_tuples(&self);
+        if (child_tuples.len() > 0) {
+            for (child_index, added_matrix, visit_count) in child_tuples.drain(..) {
+                let label = format!("added: {}, visits: {}", added_matrix, visit_count);
+                result += &format!("{} -> {} [label=\"{}\"];\n", current_node_index, child_index, label);
+
+                let child_traverser = traverser.clone().manual_move(child_index, added_matrix);
+                result += &self.render_dotfile_recursive(child_traverser);
+            }
+        }
+        result
+    }
+
     pub fn extract_training_examples<R : Rng + ?Sized>(&self) -> TrainingExamples {
         let flattened_matrix_target = flatten_matrix(self.init_game_state.target.view()).to_owned();
 
@@ -113,6 +146,13 @@ impl GameTree {
         //Otherwise, we must be at a place where we should expand all of the children.
         let child_values = traverser.expand_children(self, network_config, rng);        
         traverser.update_distributions_to_root(self, child_values);
+    }
+}
+
+impl fmt::Display for GameTreeNode {
+    fn fmt(&self, f : &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "current distance: {} \n game end distance: {}", 
+               self.current_distance, &self.game_end_distance_distribution)
     }
 }
 

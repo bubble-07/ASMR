@@ -6,7 +6,9 @@ use ndarray::*;
 use ndarray_rand::RandomExt;
 use ndarray::{Array, ArrayBase};
 use std::convert::TryInto;
+use serde::{Serialize, Deserialize};
 
+#[derive(Serialize, Deserialize)]
 pub struct Params {
     ///Dimension of the vector space the matrices operate on
     pub matrix_dim : usize,

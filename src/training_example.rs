@@ -1,4 +1,5 @@
 use ndarray::*;
+use serde::{Serialize, Deserialize};
 
 pub struct TrainingExample {
     flattened_matrix_set : Vec<Array1<f32>>,
@@ -7,6 +8,7 @@ pub struct TrainingExample {
 }
 
 ///Grouped training examples for a single game-tree
+#[derive(Serialize, Deserialize)]
 pub struct TrainingExamples {
     pub flattened_matrix_sets : Vec<Vec<Array1<f32>>>,
     pub flattened_matrix_target : Array1<f32>,

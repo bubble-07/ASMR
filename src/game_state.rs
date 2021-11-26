@@ -2,6 +2,7 @@ use crate::matrix_set::*;
 use crate::array_utils::*;
 use std::cmp::min;
 use tch::{kind, Tensor};
+use std::fmt;
 extern crate ndarray;
 extern crate ndarray_linalg;
 
@@ -13,6 +14,12 @@ pub struct GameState {
     pub target : Array2<f32>,
     pub remaining_turns : usize,
     pub distance : f32
+}
+
+impl fmt::Display for GameState {
+    fn fmt(&self, f : &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "set: {} \n target : {} \n turns : {}", &self.matrix_set, &self.target, self.remaining_turns)
+    }
 }
 
 impl GameState {
