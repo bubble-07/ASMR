@@ -49,8 +49,4 @@ impl MatrixSet {
             matrices
         }
     }
-
-    pub fn shuffle<R : Rng + ?Sized>(&mut self, rng : &mut R) {
-        self.matrices.shuffle(rng);
-    }
 }

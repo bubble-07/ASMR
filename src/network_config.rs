@@ -23,7 +23,7 @@ pub struct NetworkConfig {
 }
 
 pub struct RolloutState {
-    game_state : GameState,
+    pub game_state : GameState,
     single_embeddings : Vec<Tensor>,
     combined_embedding : Tensor
 }

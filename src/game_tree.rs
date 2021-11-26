@@ -42,9 +42,8 @@ pub struct GameTreeTraverser {
 }
 
 impl GameTree {
-    pub fn extract_training_examples<R : Rng + ?Sized>(&self, rng : &mut R) -> TrainingExamples {
+    pub fn extract_training_examples<R : Rng + ?Sized>(&self) -> TrainingExamples {
         let flattened_matrix_target = flatten_matrix(self.init_game_state.target.view()).to_owned();
-        let initial_matrix_set = self.init_game_state.matrix_set.clone();
 
         let mut result = TrainingExamples {
             flattened_matrix_sets : Vec::new(),
@@ -54,13 +53,12 @@ impl GameTree {
 
         let traverser = self.traverse_from_root();
 
-        self.extract_training_examples_recursive(&mut result, traverser, rng);
+        self.extract_training_examples_recursive(&mut result, traverser);
         result
     }
 
-    fn extract_training_examples_recursive<R : Rng + ?Sized>(&self, result : &mut TrainingExamples,
-                                                             traverser : GameTreeTraverser,
-                                                             rng : &mut R) {
+    fn extract_training_examples_recursive(&self, result : &mut TrainingExamples,
+                                                             traverser : GameTreeTraverser) {
         let num_children = traverser.get_num_children(&self);
         let num_children_sqrt = (num_children as f64).sqrt() as usize;
         //We only need to do something here if we have children
@@ -72,7 +70,7 @@ impl GameTree {
                 let (child_index, added_matrix, visit_count) = child_tuple;
 
                 let child_traverser = traverser.clone().manual_move(child_index, added_matrix);
-                self.extract_training_examples_recursive(result, child_traverser, rng);
+                self.extract_training_examples_recursive(result, child_traverser);
                 
                 let left_index = i / num_children_sqrt;
                 let right_index = i % num_children_sqrt;
@@ -83,9 +81,7 @@ impl GameTree {
             let child_visit_probability_matrix = child_visit_count_matrix
                                                  .mapv(|x| ((x as f64) / (total_visits as f64)) as f32);
             
-            let mut shuffled_matrix_set = traverser.game_state.matrix_set;
-            shuffled_matrix_set.shuffle(rng);
-            let flattened_matrix_set = shuffled_matrix_set.get_flattened_vectors().iter()
+            let flattened_matrix_set = traverser.game_state.matrix_set.get_flattened_vectors().iter()
                                                           .map(|x| x.to_owned()).collect();
 
 
@@ -115,7 +111,8 @@ impl GameTree {
             return;
         }
         //Otherwise, we must be at a place where we should expand all of the children.
-        traverser.expand_children(self, network_config, rng);        
+        let child_values = traverser.expand_children(self, network_config, rng);        
+        traverser.update_distributions_to_root(self, child_values);
     }
 }
 
@@ -128,6 +125,23 @@ impl GameTreeTraverser {
     }
     pub fn has_expanded_children(&self, game_tree : &GameTree) -> bool {
         self.current_node(game_tree).maybe_expanded_edges.is_some()
+    }
+    pub fn get_remaining_turns(&self) -> usize {
+        self.game_state.get_remaining_turns()
+    }
+
+    pub fn update_distributions_to_root(mut self, game_tree : &mut GameTree, mut child_values : Vec<f32>) {
+        let mut update_distribution = NormalInverseChiSquared::Uninformative;
+        for child_value in child_values.drain(..) {
+            update_distribution = update_distribution.update(child_value as f64);
+        }
+        for parent_node_index in self.index_stack.drain(..).rev() {
+            let current_game_end_distance_distribution = 
+                game_tree.nodes[parent_node_index].game_end_distance_distribution;
+
+            game_tree.nodes[parent_node_index].game_end_distance_distribution = 
+                current_game_end_distance_distribution.merge(&update_distribution);
+        }
     }
 
     pub fn manual_move(self, child_index : usize, added_matrix : Array2<f32>) -> Self {
@@ -185,7 +199,10 @@ impl GameTreeTraverser {
             let current_node = &game_tree.nodes[current_node_index];
 
             let current_game_end_distance_distribution = current_node.game_end_distance_distribution;
-            let normalized_distance_distribution = current_game_end_distance_distribution.as_single_observation();
+            //Has to be non-degenerate by construction, since it's a parent node
+            let nondegenerate = current_game_end_distance_distribution.coerce_to_nondegenerate().unwrap();
+            let single_observation = nondegenerate.as_single_observation();
+            let normalized_distance_distribution = NormalInverseChiSquared::NonDegenerate(single_observation);
 
             let expanded_edges = &current_node.maybe_expanded_edges.as_ref().unwrap();
             let edges = &expanded_edges.edges;
@@ -222,8 +239,12 @@ impl GameTreeTraverser {
         self.index_stack.push(best_node_index); 
     }
 
+    ///Expands the children under the traverser's position using the given
+    ///NetworkConfig for performing rollouts (if needed). Returns a collection
+    ///of all of the distanced derived from rollouts (or from the actual values, if terminal nodes)
+    ///which came from the expanded children
     fn expand_children<R : Rng + ?Sized>(&self, game_tree : &mut GameTree, 
-                                         network_config : &NetworkConfig, rng : &mut R) {
+                                         network_config : &NetworkConfig, rng : &mut R) -> Vec<f32> {
 
         let parent_rollout_state = network_config.start_rollout(self.game_state.clone());
 
@@ -232,6 +253,8 @@ impl GameTreeTraverser {
         let current_set_size = self.game_state.get_num_matrices();
         let current_distance = self.game_state.get_distance();
         let target = self.game_state.get_target();
+
+        let mut result = Vec::new();
 
         let mut edges = Vec::new();
 
@@ -257,14 +280,23 @@ impl GameTreeTraverser {
 
                 edges.push(edge);
 
-                //Perform a rollout
+                //Prepare to perform a rollout if needed
                 let mut child_rollout_state = parent_rollout_state.clone();
                 child_rollout_state = network_config.manual_step_rollout(child_rollout_state, added_matrix);
-                let rollout_distance = network_config.complete_rollout(child_rollout_state, rng);
 
-                //Children get a single-rollout-updated prior.
-                let mut game_end_distance_distribution = NormalInverseChiSquared::uninformative();
-                game_end_distance_distribution = game_end_distance_distribution.update(rollout_distance as f64);
+                let child_num_turns = child_rollout_state.game_state.get_remaining_turns();
+
+                let game_end_distance_distribution = if (child_num_turns > 0) {
+                    //For a non-terminal node, we assign a single-rollout-updated uninformative prior.
+                    let rollout_distance = network_config.complete_rollout(child_rollout_state, rng);
+                    result.push(rollout_distance);
+                    NormalInverseChiSquared::Uninformative.update(rollout_distance as f64)
+                } else {
+                    //For a terminal node, we assign the actual distance at the leaf
+                    let terminal_distance = child_rollout_state.game_state.get_distance();
+                    result.push(terminal_distance);
+                    NormalInverseChiSquared::Certain(terminal_distance as f64)
+                };
 
                 let node = GameTreeNode {
                     maybe_expanded_edges : Option::None,
@@ -279,5 +311,6 @@ impl GameTreeTraverser {
             edges
         };
         game_tree.nodes[current_node_index].maybe_expanded_edges = Option::Some(expanded_edges);
+        result
     }
 }
