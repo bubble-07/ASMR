@@ -1,4 +1,4 @@
-use tch::{no_grad_guard, nn, nn::Init, nn::Module, Tensor, nn::Path, nn::Sequential};
+use tch::{no_grad_guard, nn, nn::Init, nn::Module, Tensor, nn::Path, nn::Sequential, kind::Kind};
 use crate::network::*;
 use crate::neural_utils::*;
 use crate::game_state::*;
@@ -75,12 +75,16 @@ impl NetworkConfig {
         let mut combined_embedding = rollout_state.combined_embedding;
          
         let game_state = rollout_state.game_state.add_matrix(new_mat);
+
+        let flattened_matrix_target = game_state.get_flattened_matrix_target();
        
         let new_mat = game_state.get_newest_matrix();
-        let new_tensor = matrix_to_tensor(new_mat.view());
-        combined_embedding = self.combiner_net.forward(&combined_embedding, &new_tensor);
+        let new_tensor = vector_to_tensor(flatten_matrix(new_mat.view()));
+        let new_embedding = self.injector_net.forward(&new_tensor, &flattened_matrix_target);
 
-        single_embeddings.push(new_tensor);
+        combined_embedding = self.combiner_net.forward(&combined_embedding, &new_embedding);
+
+        single_embeddings.push(new_embedding);
 
         RolloutState {
             game_state,
@@ -172,7 +176,11 @@ impl NetworkConfig {
         //Combine the left and right policy vectors by doing pairwise dot-products
         let left_policy_mat = Tensor::stack(&left_policy_vecs, 0);
         let right_policy_mat = Tensor::stack(&right_policy_vecs, 0);
-        let policy_mat = left_policy_mat.dot(&right_policy_mat.tr());
+        let unnormalized_policy_mat = left_policy_mat.matmul(&right_policy_mat.tr());
+
+        let flattened_unnormalized_policy_mat = unnormalized_policy_mat.reshape(&[(k * k) as i64]);
+        let flattened_policy_mat = flattened_unnormalized_policy_mat.softmax(0, Kind::Float);
+        let policy_mat = flattened_policy_mat.reshape(&[k as i64, k as i64]);
 
         //TODO: Need to map the policy matrix through a softmax function
         policy_mat

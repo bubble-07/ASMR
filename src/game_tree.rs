@@ -47,16 +47,16 @@ impl GameTree {
     pub fn new(init_game_state : GameState) -> GameTree {
         let mut nodes = Vec::new();
 
-        let init_distance = init_game_state.distance;
+        let current_distance = init_game_state.distance;
 
         //Let the initial game-state just have an observation of the initial distance.
         //We don't really care what our initialization looks like, tbh, so long as it provides
         //a valid prior distribution to propagate down the tree.
-        let game_end_distance_distribution = NormalInverseChiSquared::Uninformative.update(init_distance as f64);
+        let game_end_distance_distribution = NormalInverseChiSquared::Uninformative.update(current_distance as f64);
 
         let init_node = GameTreeNode {
             maybe_expanded_edges : Option::None,
-            current_distance : init_game_state.distance,
+            current_distance,
             game_end_distance_distribution
         };
         nodes.push(init_node);
@@ -296,9 +296,11 @@ impl GameTreeTraverser {
         let edges = &mut current_node.maybe_expanded_edges.as_mut().unwrap().edges;
         
         edges[min_index].visit_count += 1;
+        let added_matrix = edges[min_index].added_matrix.clone();
 
         let best_node_index = children_start_index + min_index;
         self.index_stack.push(best_node_index); 
+        self.game_state = self.game_state.clone().add_matrix(added_matrix);
     }
 
     ///Expands the children under the traverser's position using the given
@@ -355,9 +357,8 @@ impl GameTreeTraverser {
                     NormalInverseChiSquared::Uninformative.update(rollout_distance as f64)
                 } else {
                     //For a terminal node, we assign the actual distance at the leaf
-                    let terminal_distance = child_rollout_state.game_state.get_distance();
-                    result.push(terminal_distance);
-                    NormalInverseChiSquared::Certain(terminal_distance as f64)
+                    result.push(child_current_distance);
+                    NormalInverseChiSquared::Certain(child_current_distance as f64)
                 };
 
                 let node = GameTreeNode {
