@@ -17,7 +17,7 @@ pub struct ConcatThenSequential {
 
 impl BiModule for Concat {
     fn forward(&self, xs : &Tensor, ys : &Tensor) -> Tensor {
-        let concatted = Tensor::concat(&[xs, ys], 0i64);
+        let concatted = Tensor::concat(&[xs, ys], 1i64);
         concatted
     }
 }

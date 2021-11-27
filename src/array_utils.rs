@@ -16,18 +16,22 @@ pub fn tensor_to_vector(tensor : &Tensor) -> Array1<f32> {
 
 pub fn tensor_to_matrix(tensor : &Tensor) -> Array2<f32> {
     let shape : Vec<usize> = tensor.size().iter().map(|s| *s as usize).collect();
-    tensor_to_vector(tensor).into_shape(shape).unwrap().into_dimensionality::<Ix2>().unwrap()
+    let truncated_shape = vec![shape[1], shape[2]];
+    tensor_to_vector(tensor).into_shape(truncated_shape).unwrap().into_dimensionality::<Ix2>().unwrap()
 }
 
 pub fn vector_to_tensor(vec : ArrayView1<f32>) -> Tensor {
-    Tensor::try_from(vec.to_slice().unwrap()).unwrap()
+    let dim = vec.shape()[0];
+    let flat_result = Tensor::try_from(vec.to_slice().unwrap()).unwrap();
+    flat_result.reshape(&[1, dim as i64])
 }
 
 pub fn matrix_to_tensor(mat : ArrayView2<f32>) -> Tensor {
     let shape : Vec<i64> = mat.shape().iter().map(|s| *s as i64).collect();
+    let expanded_shape = vec![1, shape[0], shape[1]];
     let flat_mat = flatten_matrix(mat);
     let tensor = vector_to_tensor(flat_mat);
-    tensor.reshape(&shape)
+    tensor.reshape(&expanded_shape)
 }
 
 pub fn sq_frob_dist(a : ArrayView2<f32>, b : ArrayView2<f32>) -> f32 {

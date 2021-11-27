@@ -160,6 +160,10 @@ impl NetworkConfig {
         single_embeddings
     }
 
+    ///Given a collection of K feature vector stacks (dimension NxF, N is the number
+    ///of samples and F is the number of features), and a feature vector stack for their
+    ///combined embedding (dimension NxF), yields a computed Policy [Matrix stack
+    ///of dimension NxKxK] tensor.
     fn get_policy(&self, single_embeddings : &[Tensor], combined_embedding : &Tensor) -> Tensor {
         let k = single_embeddings.len();
         //Compute left and right policy vectors
@@ -174,20 +178,26 @@ impl NetworkConfig {
         }
 
         //Combine the left and right policy vectors by doing pairwise dot-products
-        let left_policy_mat = Tensor::stack(&left_policy_vecs, 0);
-        let right_policy_mat = Tensor::stack(&right_policy_vecs, 0);
-        let unnormalized_policy_mat = left_policy_mat.matmul(&right_policy_mat.tr());
+        //Each policy vec is NxF
+        //NxKxF
+        let left_policy_mat = Tensor::stack(&left_policy_vecs, 1);
+        //NxFxK
+        let right_policy_mat = Tensor::stack(&right_policy_vecs, 2);
+        //NxKxK
+        let unnormalized_policy_mat = left_policy_mat.matmul(&right_policy_mat);
 
-        let flattened_unnormalized_policy_mat = unnormalized_policy_mat.reshape(&[(k * k) as i64]);
-        let flattened_policy_mat = flattened_unnormalized_policy_mat.softmax(0, Kind::Float);
-        let policy_mat = flattened_policy_mat.reshape(&[k as i64, k as i64]);
+        let n = unnormalized_policy_mat.size()[0];
 
-        //TODO: Need to map the policy matrix through a softmax function
+        let flattened_unnormalized_policy_mat = unnormalized_policy_mat.reshape(&[n, (k * k) as i64]);
+        let flattened_policy_mat = flattened_unnormalized_policy_mat.softmax(1, Kind::Float);
+        let policy_mat = flattened_policy_mat.reshape(&[n, k as i64, k as i64]);
+
         policy_mat
     }
 
-    ///Given a collection of K [flattened] matrices (dimension M), and a flattened matrix target
-    ///(dimension M), yields a computed Policy [Matrix of dimension KxK] tensor
+    ///Given a collection of K [flattened] matrix stacks (dimension NxM, N is the
+    ///number of samples and M is the flattened matrix dimension), and a flattened matrix target
+    ///(dimension NxM), yields a computed Policy [Matrix stack of dimension NxKxK] tensor
     pub fn get_policy_from_scratch(&self, flattened_matrix_set : &[Tensor], flattened_matrix_target : &Tensor) ->
                  Tensor {
 
