@@ -8,7 +8,7 @@ use crate::network_config::*;
 use crate::array_utils::*;
 use crate::game_state::*;
 use crate::normal_inverse_chi_squared::*;
-use crate::training_example::*;
+use crate::game_data::*;
 use std::fmt;
 
 use rand::Rng;
@@ -97,10 +97,10 @@ impl GameTree {
         result
     }
 
-    pub fn extract_training_examples(&self) -> TrainingExamples {
+    pub fn extract_game_data(&self) -> GameData {
         let flattened_matrix_target = flatten_matrix(self.init_game_state.target.view()).to_owned();
 
-        let mut result = TrainingExamples {
+        let mut result = GameData {
             flattened_matrix_sets : Vec::new(),
             flattened_matrix_target,
             child_visit_probabilities : Vec::new()
@@ -108,11 +108,11 @@ impl GameTree {
 
         let traverser = self.traverse_from_root();
 
-        self.extract_training_examples_recursive(&mut result, traverser);
+        self.extract_game_data_recursive(&mut result, traverser);
         result
     }
 
-    fn extract_training_examples_recursive(&self, result : &mut TrainingExamples,
+    fn extract_game_data_recursive(&self, result : &mut GameData,
                                                              traverser : GameTreeTraverser) {
         let num_children = traverser.get_num_children(&self);
         let num_children_sqrt = (num_children as f64).sqrt() as usize;
@@ -125,7 +125,7 @@ impl GameTree {
                 let (child_index, added_matrix, visit_count) = child_tuple;
 
                 let child_traverser = traverser.clone().manual_move(child_index, added_matrix);
-                self.extract_training_examples_recursive(result, child_traverser);
+                self.extract_game_data_recursive(result, child_traverser);
                 
                 let left_index = i / num_children_sqrt;
                 let right_index = i % num_children_sqrt;

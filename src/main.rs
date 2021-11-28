@@ -3,7 +3,7 @@
 #![allow(unused_imports)]
 #![allow(unused_parens)]
 
-mod training_example;
+mod game_data;
 mod game_tree;
 mod normal_inverse_chi_squared;
 mod array_utils;
@@ -13,6 +13,7 @@ mod neural_utils;
 mod network;
 mod network_config;
 mod game_state;
+mod training_examples;
 
 use tch::{kind, Tensor};
 use std::fs;
@@ -20,48 +21,91 @@ use std::env;
 use crate::game_state::*;
 use crate::params::*;
 use crate::game_tree::*;
-use crate::training_example::*;
+use crate::game_data::*;
+use crate::training_examples::*;
 use crate::network_config::*;
 use std::str::from_utf8;
+use std::path::Path;
 
 fn print_help() {
     println!("usage:
-ASMR run_game [game_config_path] [network_config_path] [training_data_output_path] [dotfile_output_path]?
+ASMR run_game [game_config_path] [network_config_path] [game_data_output_path] [dotfile_output_path]?
     Using the given game configuration json and network configuration, randomly-generates
-    and runs a game, outputting finalized training-data to the given output path.
+    and runs a game, outputting finalized game-data (training data) to the given output path.
     If [dotfile_output_path]? is present, this will also output a .dot file visualization
-    of the game-tree once the simulation has completed");
+    of the game-tree once the simulation has completed.
+ASMR gen_network_config [game_config_path] [network_config_output_path]
+    Using the given game configuration json, generates a randomly-initialized
+    network configuration and outputs it to the given path
+ASMR distill_training_data [game_config_path] [game_data_root] [training_data_output_path]
+    Using the given game configuration json, distills all training data files under the
+    given game data root directory into bona fide training data, which is output
+    into a file at the given specified output path
+ASMR train [game_config_path] [network_config_path] [training_data_path]
+    Using the given game configuration json, trains the network
+    with the initial configuration stored at the given network configuration path
+    and the training data stored at the given training data path.
+    Periodically [and also once training is completed], the updated
+    state of the network will overwrite the data at the passed network configuration path.");
 }
 
 fn main() {
     let args : Vec<String> = env::args().collect();
-    if (args.len() < 2) {
+    if (args.len() < 3) {
         print_help();
         return;
     }
 
     let command = &args[1];
-    match &command[..] {
-        "run_game" => {
-            if (args.len() < 5) {
-                eprintln!("error: not enough arguments");
-                print_help();
-                return;
+    let game_config_path = &args[2];
+
+    let maybe_game_config = load_game_config(game_config_path);
+    match (maybe_game_config) {
+        Result::Ok(params) => {
+            match &command[..] {
+                "distill_training_data" => {
+                    if (args.len() < 5) {
+                        eprintln!("error: not enough arguments");
+                        print_help();
+                        return;
+                    }
+                    let game_data_root = &args[3];
+                    let training_data_output_path = &args[4];
+                    distill_training_data_command(params, game_data_root, training_data_output_path);
+                },
+                "run_game" => {
+                    if (args.len() < 5) {
+                        eprintln!("error: not enough arguments");
+                        print_help();
+                        return;
+                    }
+                    let network_config_path = &args[3];
+                    let training_data_output_path = &args[4];
+                    let dotfile_output_path = if (args.len() > 5) {
+                        Option::Some(args[5].clone())
+                    } else {
+                        Option::None
+                    };
+                    run_game_command(params, network_config_path, 
+                                     training_data_output_path, dotfile_output_path);
+                },
+                "gen_network_config" => {
+                    if (args.len() < 4) {
+                        eprintln!("error: not enough arguments");
+                        print_help();
+                        return;
+                    }
+                    let network_config_output_path = &args[3];
+                    gen_network_config_command(params, network_config_output_path);
+                },
+                _ => {
+                    eprintln!("error: invalid command");
+                    print_help();
+                }
             }
-            let game_config_path = &args[2];
-            let network_config_path = &args[3];
-            let training_data_output_path = &args[4];
-            let dotfile_output_path = if (args.len() > 5) {
-                Option::Some(args[5].clone())
-            } else {
-                Option::None
-            };
-            run_game_command(game_config_path, network_config_path, 
-                             training_data_output_path, dotfile_output_path);
         },
-        _ => {
-            eprintln!("error: invalid command");
-            print_help();
+        Result::Err(err) => {
+            eprintln!("Failed to read game config file: {}", err);
         }
     }
 }
@@ -95,11 +139,7 @@ pub fn write_to_path(path : &str, contents : &[u8]) -> Result<(), String> {
     }
 }
 
-
-
-fn run_game_command(game_config_path : &str, network_config_path : &str, 
-            training_data_output_path : &str, dotfile_output_path : Option<String>) {
-
+fn load_game_config(game_config_path : &str) -> Result<Params, String> {
     let maybe_game_config_contents = read_from_path(game_config_path);
     match (maybe_game_config_contents) {
         Result::Ok(path_contents) => {
@@ -109,25 +149,41 @@ fn run_game_command(game_config_path : &str, network_config_path : &str,
                     let maybe_params = serde_json::from_str::<Params>(param_json);
                     match (maybe_params) {
                         Result::Ok(params) => {
-                            run_game(params, training_data_output_path, dotfile_output_path);
+                            Result::Ok(params)
                         },
                         Result::Err(err) => {
-                            eprintln!("Game config deserialization error: {}", err);
+                            Result::Err(format!("Game config deserialization error: {}", err))
                         }
                     }
                 },
                 Result::Err(err) => {
-                    eprintln!("Game config json error: {}", err);
+                    Result::Err(format!("Game config json error: {}", err))
                 }
             }
         },
         Result::Err(err) => {
-            eprintln!("Failed to read game config: {}", err);
+            Result::Err(format!("Failed to read game config file: {}", err))
+        }
+    }
+}
+fn gen_network_config_command(params : Params, network_config_output_path : &str) {
+    let vs = tch::nn::VarStore::new(tch::Device::Cpu);
+    let _network_config = NetworkConfig::new(&params, &vs.root());
+    let path = Path::new(network_config_output_path);
+    let maybe_save_result = vs.save(&path);
+    match (maybe_save_result) {
+        Result::Ok(_) => {
+            println!("Successfully wrote out a new network configuration");
+        },
+        Result::Err(e) => {
+            eprintln!("Failed to write out network configuration: {}", e);
         }
     }
 }
 
-fn run_game(params : Params, training_data_output_path : &str,
+fn run_game_command(params : Params, 
+                    network_config_path : &str,
+                    game_data_output_path : &str,
                     maybe_dotfile_output_path : Option<String>) {
     let mut rng = rand::thread_rng();
     let game_state = params.generate_random_game(&mut rng);
@@ -135,6 +191,17 @@ fn run_game(params : Params, training_data_output_path : &str,
 
     let mut vs = tch::nn::VarStore::new(tch::Device::Cpu);
     let network_config = NetworkConfig::new(&params, &vs.root());
+
+    let maybe_load_result = vs.load(&Path::new(network_config_path));
+    match (maybe_load_result) {
+        Result::Ok(_) => {
+            println!("Successfully loaded network config");
+        },
+        Result::Err(e) => {
+            eprintln!("Failed to read network config: {}", e);
+            return;
+        }
+    }
 
     for i in 0..params.iters_per_game {
         println!("Iteration: {}", i);
@@ -155,22 +222,84 @@ fn run_game(params : Params, training_data_output_path : &str,
         },
         _ => {}
     }
-    let training_data = game_tree.extract_training_examples();
-    let maybe_serialized_training_data = bincode::serialize(&training_data);
-    match (maybe_serialized_training_data) {
-        Result::Ok(serialized_training_data) => {
-            let maybe_write_result = write_to_path(training_data_output_path, &serialized_training_data);
+    let game_data = game_tree.extract_game_data();
+    let maybe_serialized_game_data = bincode::serialize(&game_data);
+    match (maybe_serialized_game_data) {
+        Result::Ok(serialized_game_data) => {
+            let maybe_write_result = write_to_path(game_data_output_path, &serialized_game_data);
             match (maybe_write_result) {
                 Result::Ok(_) => {
-                    println!("Successfully wrote out generated training data");
+                    println!("Successfully wrote out generated game data");
                 },
                 Result::Err(err) => {
-                    println!("Failed to write out training data: {}", err);
+                    println!("Failed to write out game data: {}", err);
                 }
             }
         },
         Result::Err(err) => {
-            println!("Training data serialization error: {}", err);
+            println!("Game data serialization error: {}", err);
         }
     }
 }
+
+fn distill_training_data_command(params : Params, game_data_root : &str, training_data_output_path : &str) {
+    let game_data_root_path = Path::new(game_data_root);
+    let maybe_dir_listing = fs::read_dir(&game_data_root_path);
+
+    let mut loaded_game_datas : Vec<GameData> = Vec::new();
+
+    match (maybe_dir_listing) {
+        Result::Ok(dir_listing) => {
+            for maybe_entry in dir_listing {
+                match (maybe_entry) {
+                    Result::Ok(entry) => {
+                        let entry_path = entry.path();
+                        let maybe_serialized_game_data = read_from_path(entry_path.to_str().unwrap());
+                        match (maybe_serialized_game_data) {
+                            Result::Ok(serialized_game_data) => {
+                                let maybe_game_data = bincode::deserialize::<GameData>(&serialized_game_data);
+                                match (maybe_game_data) {
+                                    Result::Ok(game_data) => {
+                                        loaded_game_datas.push(game_data);
+                                    },
+                                    Result::Err(err) => {
+                                        eprintln!("Failed to deserialize contents of a file in the directory: {}", err);
+                                        return;
+                                    }
+                                }
+                            },
+                            Result::Err(err) => {
+                                eprintln!("Failed to read contents of a file in the directory: {}", err);
+                                return;
+                            }
+                        }
+                    },
+                    Result::Err(err) => {
+                        eprintln!("Failed to access contents of a file in the directory: {}", err);
+                        return;
+                    }
+                }
+            }
+        },
+        Result::Err(err) => {
+            eprintln!("Failed to list game data directory contents: {}", err);
+            return;
+        }
+    }
+    let mut rng = rand::thread_rng();
+    let training_examples = TrainingExamples::from_game_data(&params, loaded_game_datas, &mut rng);
+
+    let output_path = Path::new(training_data_output_path);
+    let maybe_save_result = training_examples.save(&output_path);
+    match (maybe_save_result) {
+        Result::Ok(_) => {
+            println!("Successfully distilled and saved training data");
+        },
+        Result::Err(err) => {
+            eprintln!("Failed to write distilled training data: {}", err);
+        }
+    }
+
+}
+
+

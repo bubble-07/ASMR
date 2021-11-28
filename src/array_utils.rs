@@ -70,6 +70,13 @@ pub fn sample_index_pair<R : Rng + ?Sized>(mat : ArrayView2<f32>, rng : &mut R) 
     (row_index, col_index)
 }
 
+pub fn swap_rows(matrix : &mut Array2<f32>, i : usize, j : usize) {
+    let row_i = matrix.row(i).to_owned();
+    let row_j = matrix.row(j).to_owned();
+    matrix.row_mut(i).assign(&row_j);
+    matrix.row_mut(j).assign(&row_i);
+}
+
 ///Given a vector of floats, yields the index and the value of the largest
 ///float in `vec`.
 pub fn max_index_and_value(vec : ArrayView1<f32>) -> (usize, f32) {
