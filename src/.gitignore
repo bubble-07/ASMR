@@ -2,3 +2,4 @@
 *.dot
 *.bin
 *.torch
+*.tensor

@@ -27,7 +27,8 @@ struct TrainingExamplesBuilder {
     pub flattened_matrix_targets : HashMap<usize, Vec<f32>>,
     ///axes are NxKxK
     pub child_visit_probabilities : HashMap<usize, Vec<f32>>,
-    pub n : usize,
+    ///Maps from the set size to the number of samples for that set size
+    pub num_samples : HashMap<usize, usize>,
     pub m : usize
 }
 
@@ -42,29 +43,32 @@ impl TrainingExamplesBuilder {
         for set_size in set_sizes.drain(..) {
             let k = set_size;
 
+            let n = self.num_samples.remove(&set_size).unwrap();
             let matrix_sets = self.flattened_matrix_sets.remove(&set_size).unwrap();
             let matrix_targets = self.flattened_matrix_targets.remove(&set_size).unwrap();
-            let visit_probabilities = self.flattened_matrix_targets.remove(&set_size).unwrap();
+            let visit_probabilities = self.child_visit_probabilities.remove(&set_size).unwrap();
             
             let matrix_sets = Array::from_vec(matrix_sets);
             let matrix_targets = Array::from_vec(matrix_targets);
             let visit_probabilities = Array::from_vec(visit_probabilities);
 
-            let mut matrix_sets = matrix_sets.into_shape((self.n, k * self.m)).unwrap();
-            let mut matrix_targets = matrix_targets.into_shape((self.n, self.m)).unwrap();
-            let mut visit_probabilities = visit_probabilities.into_shape((self.n, k * k)).unwrap();
+            let mut matrix_sets = matrix_sets.into_shape((n, k * self.m)).unwrap();
+            let mut matrix_targets = matrix_targets.into_shape((n, self.m)).unwrap();
+            let mut visit_probabilities = visit_probabilities.into_shape((n, k * k)).unwrap();
             
             //Fisher-Yates shuffle the above three
-            for i in 0..self.n-2 {
-                let j = rng.gen_range(i..self.n);
-                swap_rows(&mut matrix_sets, i, j);
-                swap_rows(&mut matrix_targets, i, j);
-                swap_rows(&mut visit_probabilities, i, j);
+            if (n > 1) {
+                for i in 0..n-1 {
+                    let j = rng.gen_range(i..n);
+                    swap_rows(&mut matrix_sets, i, j);
+                    swap_rows(&mut matrix_targets, i, j);
+                    swap_rows(&mut visit_probabilities, i, j);
+                }
             }
 
-            let mut matrix_sets = matrix_sets.into_shape((self.n, k, self.m)).unwrap();
-            let matrix_targets = matrix_targets.into_shape((self.n, self.m)).unwrap();
-            let visit_probabilities = visit_probabilities.into_shape((self.n, k, k)).unwrap();
+            let mut matrix_sets = matrix_sets.into_shape((n, k, self.m)).unwrap();
+            let matrix_targets = matrix_targets.into_shape((n, self.m)).unwrap();
+            let visit_probabilities = visit_probabilities.into_shape((n, k, k)).unwrap();
 
             //Need to transpose matrix_sets
             matrix_sets.swap_axes(0, 1);
@@ -78,9 +82,9 @@ impl TrainingExamplesBuilder {
             let mut matrix_targets_tensor = Tensor::try_from(flat_matrix_targets).unwrap();
             let mut visit_probabilities_tensor = Tensor::try_from(flat_visit_probabilities).unwrap();
 
-            matrix_sets_tensor = matrix_sets_tensor.reshape(&[k as i64, self.n as i64, self.m as i64]);
-            matrix_targets_tensor = matrix_targets_tensor.reshape(&[self.n as i64, self.m as i64]);
-            visit_probabilities_tensor = visit_probabilities_tensor.reshape(&[self.n as i64, k as i64, k as i64]);
+            matrix_sets_tensor = matrix_sets_tensor.reshape(&[k as i64, n as i64, self.m as i64]);
+            matrix_targets_tensor = matrix_targets_tensor.reshape(&[n as i64, self.m as i64]);
+            visit_probabilities_tensor = visit_probabilities_tensor.reshape(&[n as i64, k as i64, k as i64]);
 
             flattened_matrix_sets.insert(set_size, matrix_sets_tensor);
             flattened_matrix_targets.insert(set_size, matrix_targets_tensor);
@@ -147,6 +151,7 @@ impl TrainingExamplesBuilder {
             self.flattened_matrix_sets.insert(set_size, Vec::new());
             self.flattened_matrix_targets.insert(set_size, Vec::new());
             self.child_visit_probabilities.insert(set_size, Vec::new());
+            self.num_samples.insert(set_size, 0);
         }
 
         let matrix_set_dest = self.flattened_matrix_sets.get_mut(&set_size).unwrap();
@@ -159,6 +164,9 @@ impl TrainingExamplesBuilder {
 
         self.child_visit_probabilities.get_mut(&set_size).unwrap()
             .extend_from_slice(child_visit_probabilities.as_slice().unwrap());
+
+        let prev_num_samples = self.num_samples.remove(&set_size).unwrap(); 
+        self.num_samples.insert(set_size, prev_num_samples + 1);
     }
 
 }
@@ -168,11 +176,12 @@ impl TrainingExamples {
         let flattened_matrix_sets = HashMap::new();
         let flattened_matrix_targets = HashMap::new();
         let child_visit_probabilities = HashMap::new();
+        let num_samples = HashMap::new();
         let mut builder = TrainingExamplesBuilder {
             flattened_matrix_sets,
             flattened_matrix_targets,
             child_visit_probabilities,
-            n : 0,
+            num_samples,
             m : params.get_flattened_matrix_dim() as usize
         };
 
