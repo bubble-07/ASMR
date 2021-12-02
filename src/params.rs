@@ -32,7 +32,11 @@ pub struct Params {
     ///Upper-bound on the number of turns allowed in the game
     pub max_num_turns : usize,
     ///Number of monte-carlo-tree-search updates per game
-    pub iters_per_game : usize
+    pub iters_per_game : usize,
+    ///Number of epochs for training
+    pub train_epochs : usize,
+    ///Step-size for Adam optimizer
+    pub train_step_size : f64 
 }
 
 impl Params {

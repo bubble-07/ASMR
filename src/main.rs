@@ -15,7 +15,7 @@ mod network_config;
 mod game_state;
 mod training_examples;
 
-use tch::{kind, Tensor};
+use tch::{kind, Tensor, nn::Adam, nn::OptimizerConfig};
 use std::fs;
 use std::env;
 use crate::game_state::*;
@@ -97,6 +97,16 @@ fn main() {
                     }
                     let network_config_output_path = &args[3];
                     gen_network_config_command(params, network_config_output_path);
+                },
+                "train" => {
+                    if (args.len() < 5) {
+                        eprintln!("error: not enough arguments");
+                        print_help();
+                        return;
+                    }
+                    let network_config_path = &args[3];
+                    let training_data_path = &args[4];
+                    train_command(params, network_config_path, training_data_path);
                 },
                 _ => {
                     eprintln!("error: invalid command");
@@ -299,7 +309,42 @@ fn distill_training_data_command(params : Params, game_data_root : &str, trainin
             eprintln!("Failed to write distilled training data: {}", err);
         }
     }
-
 }
 
+fn train_command(params : Params, network_config_path : &str, training_data_path : &str) {
+    let mut vs = tch::nn::VarStore::new(tch::Device::Cpu);
+    let network_config = NetworkConfig::new(&params, &vs.root());
 
+    let network_path = Path::new(network_config_path);
+
+    let maybe_load_result = vs.load(&network_path);
+    match (maybe_load_result) {
+        Result::Ok(_) => {
+            println!("Successfully loaded initial network config");
+        },
+        Result::Err(e) => {
+            eprintln!("Failed to read initial network config: {}", e);
+            return;
+        }
+    }
+
+    let data_path = Path::new(training_data_path);
+    let maybe_training_examples = TrainingExamples::load(&data_path);
+    match (maybe_training_examples) {
+        Result::Ok(training_examples) => { 
+            println!("Successfully loaded training examples");
+
+            let mut opt = Adam::default().build(&vs, 1e-3).unwrap();
+            for epoch in 0..params.train_epochs {
+                let train_loss = network_config.run_training_epoch(&training_examples, &mut opt);
+                println!("epoch: {} train loss: {}", epoch, train_loss);
+
+                //TODO: After each epoch, write out the network config again
+            }
+        },
+        Result::Err(err) => {
+            eprintln!("Failed to read training examples: {}", err);
+            return;
+        }
+    }
+}

@@ -1,9 +1,11 @@
-use tch::{no_grad_guard, nn, nn::Init, nn::Module, Tensor, nn::Path, nn::Sequential, kind::Kind};
+use tch::{no_grad_guard, nn, nn::Init, nn::Module, Tensor, nn::Path, nn::Sequential, kind::Kind,
+          nn::Optimizer};
 use crate::network::*;
 use crate::neural_utils::*;
 use crate::game_state::*;
 use crate::array_utils::*;
 use crate::params::*;
+use crate::training_examples::*;
 use ndarray::*;
 
 use rand::Rng;
@@ -99,7 +101,7 @@ impl NetworkConfig {
         let single_embeddings = &rollout_state.single_embeddings;
         let combined_embedding = &rollout_state.combined_embedding;
 
-        let policy_tensor = self.get_policy(&single_embeddings, &combined_embedding, false);
+        let policy_tensor = self.get_policy(&single_embeddings, &combined_embedding);
         let policy_mat = tensor_to_matrix(&policy_tensor);
         let (ind_one, ind_two) = sample_index_pair(policy_mat.view(), rng);
 
@@ -160,13 +162,7 @@ impl NetworkConfig {
         single_embeddings
     }
 
-    ///Given a collection of K feature vector stacks (dimension NxF, N is the number
-    ///of samples and F is the number of features), and a feature vector stack for their
-    ///combined embedding (dimension NxF), yields a computed Policy [Matrix stack
-    ///of dimension NxKxK] tensor. The final argument determines if the policy
-    ///is expressed in terms of probabilities or in terms of log-probabilities
-    fn get_policy(&self, single_embeddings : &[Tensor], combined_embedding : &Tensor,
-                  as_log : bool) -> Tensor {
+    fn get_unnormalized_policy(&self, single_embeddings : &[Tensor], combined_embedding : &Tensor) -> Tensor {
         let k = single_embeddings.len();
         //Compute left and right policy vectors
         let mut left_policy_vecs = Vec::new();
@@ -182,20 +178,34 @@ impl NetworkConfig {
         //Combine the left and right policy vectors by doing pairwise dot-products
         //Each policy vec is NxF
         //NxKxF
-        let left_policy_mat = Tensor::stack(&left_policy_vecs, 1);
+        let unnormalized_left_policy_mat = Tensor::stack(&left_policy_vecs, 1);
         //NxFxK
-        let right_policy_mat = Tensor::stack(&right_policy_vecs, 2);
+        let unnormalized_right_policy_mat = Tensor::stack(&right_policy_vecs, 2);
         //NxKxK
+        
+        let left_policy_mat = unnormalized_left_policy_mat.tanh();
+        let right_policy_mat = unnormalized_right_policy_mat.tanh();
+        
         let unnormalized_policy_mat = left_policy_mat.matmul(&right_policy_mat);
+        unnormalized_policy_mat
+    }
+
+    ///Given a collection of K feature vector stacks (dimension NxF, N is the number
+    ///of samples and F is the number of features), and a feature vector stack for their
+    ///combined embedding (dimension NxF), yields a computed Policy [Matrix stack
+    ///of dimension NxKxK] tensor. The final argument determines if the policy
+    ///is expressed in terms of probabilities or in terms of log-probabilities
+    fn get_policy(&self, single_embeddings : &[Tensor], combined_embedding : &Tensor) -> Tensor {
+        let k = single_embeddings.len();
+        //NxKxK
+        let unnormalized_policy_mat = self.get_unnormalized_policy(single_embeddings, combined_embedding);
 
         let n = unnormalized_policy_mat.size()[0];
 
         let flattened_unnormalized_policy_mat = unnormalized_policy_mat.reshape(&[n, (k * k) as i64]);
-        let flattened_policy_mat = if (as_log) {
-            flattened_unnormalized_policy_mat.log_softmax(1, Kind::Float)
-        } else {
-            flattened_unnormalized_policy_mat.softmax(1, Kind::Float)
-        };
+        let flattened_policy_mat =
+                    flattened_unnormalized_policy_mat.softmax(1, Kind::Float);
+
         let policy_mat = flattened_policy_mat.reshape(&[n, k as i64, k as i64]);
 
         policy_mat
@@ -205,7 +215,7 @@ impl NetworkConfig {
     ///number of samples and M is the flattened matrix dimension), and a flattened matrix target
     ///(dimension NxM), yields a computed Policy [Matrix stack of dimension NxKxK] tensor
     pub fn get_policy_from_scratch(&self, flattened_matrix_set : &[Tensor], flattened_matrix_target : &Tensor,
-                                   as_log : bool) -> Tensor {
+                                   as_unnormalized : bool) -> Tensor {
 
         //First, compute the embeddings for every input matrix
         let single_embeddings = self.get_single_embeddings(flattened_matrix_set, flattened_matrix_target);
@@ -214,21 +224,54 @@ impl NetworkConfig {
         //entire collection of matrices
         let combined_embedding = self.combine_embeddings(&single_embeddings);
 
-        let policy_mat = self.get_policy(&single_embeddings, &combined_embedding, as_log);
+        let policy_mat = if (as_unnormalized) {
+            self.get_unnormalized_policy(&single_embeddings, &combined_embedding)
+        } else {
+            self.get_policy(&single_embeddings, &combined_embedding)
+        };
 
         policy_mat
     }
     pub fn get_loss_from_scratch(&self, flattened_matrix_set : &[Tensor], flattened_matrix_target : &Tensor,
                                  target_policy : &Tensor) -> Tensor {
-        let computed_log_policy = self.get_policy_from_scratch(flattened_matrix_set, flattened_matrix_target, true);
-        let n = computed_log_policy.size()[0];
-        let k = computed_log_policy.size()[1];
-        let d = n * k * k;
+        let computed_unnormalized_policy = self.get_policy_from_scratch(flattened_matrix_set, flattened_matrix_target, true);
+        let n = computed_unnormalized_policy.size()[0];
+        let k = computed_unnormalized_policy.size()[1];
 
-        let flattened_log_policy = computed_log_policy.reshape(&[d]);
-        let flattened_target_policy = target_policy.reshape(&[d]);
-        let negative_loss = flattened_target_policy.dot(&flattened_log_policy);
-        let loss = -negative_loss;
-        loss
+        let flattened_unnormalized_policy = computed_unnormalized_policy.reshape(&[n as i64, (k * k) as i64]);
+        let log_softmaxed = flattened_unnormalized_policy.log_softmax(1, Kind::Float);
+
+        target_policy.print();
+
+        let one_over_n = 1.0f32 / (n as f32);
+        let flattened_log_softmaxed = one_over_n * log_softmaxed.reshape(&[(n * k * k) as i64]);
+        let flattened_target_policy = target_policy.reshape(&[(n * k * k) as i64]);
+        let inner_product = flattened_target_policy.dot(&flattened_log_softmaxed);
+
+        -inner_product
+    }
+    pub fn run_training_epoch(&self, training_examples : &TrainingExamples, opt : &mut Optimizer) -> f64 {
+        //TODO: Break the data up into minibatches, too!
+        let mut total_loss = 0f64;
+        let mut total_n = 0;
+
+        let sizings : Vec<usize> = training_examples.flattened_matrix_sets.keys().map(|x| *x).collect();
+
+        for sizing in sizings {
+            let flattened_matrix_sets = training_examples.flattened_matrix_sets.get(&sizing).unwrap();
+            let flattened_matrix_targets = training_examples.flattened_matrix_targets.get(&sizing).unwrap();
+            let child_visit_probabilities = training_examples.child_visit_probabilities.get(&sizing).unwrap();
+
+            let n = child_visit_probabilities.size()[0];
+            total_n += n;
+            
+            let normalized_loss = self.get_loss_from_scratch(flattened_matrix_sets, flattened_matrix_targets,
+                                             child_visit_probabilities);
+            total_loss += f64::from(&normalized_loss) * (n as f64);
+
+            opt.backward_step(&normalized_loss);
+        }
+        total_loss /= total_n as f64;
+        total_loss
     }
 }

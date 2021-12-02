@@ -10,19 +10,19 @@ use std::path::Path;
 use crate::params::*;
 
 pub struct TrainingExamples {
-    ///Mapping from set size to a tensor of dims KxNxM,
+    ///Mapping from set size to a K-element list of tensors of dims NxM,
     ///where K is the set size, N is the number of examples,
     ///and M is the flattened matrix dimension
-    pub flattened_matrix_sets : HashMap<usize, Tensor>,
+    pub flattened_matrix_sets : HashMap<usize, Vec<Tensor>>,
     ///Mapping from set size to a tensor of dims NxM
     pub flattened_matrix_targets : HashMap<usize, Tensor>,
-    ///Mapping from set size to a tensor of dims NxKxK
+    ///Mapping from set size to a tensor of dims Nx(K*K)
     pub child_visit_probabilities : HashMap<usize, Tensor>,
 }
 
 struct TrainingExamplesBuilder {
-    ///axes are NxKxM, will be transposed to KxNxM upon tensor conversion
-    pub flattened_matrix_sets : HashMap<usize, Vec<f32>>,
+    ///K elements, axes are NxM
+    pub flattened_matrix_sets : HashMap<usize, Vec<Vec<f32>>>,
     ///axes are NxM
     pub flattened_matrix_targets : HashMap<usize, Vec<f32>>,
     ///axes are NxKxK
@@ -44,15 +44,20 @@ impl TrainingExamplesBuilder {
             let k = set_size;
 
             let n = self.num_samples.remove(&set_size).unwrap();
-            let matrix_sets = self.flattened_matrix_sets.remove(&set_size).unwrap();
+
+            let mut prior_matrix_sets_vec = self.flattened_matrix_sets.remove(&set_size).unwrap();
+            let mut matrix_sets_vec = Vec::new();
+            for matrix_set in prior_matrix_sets_vec.drain(..) {
+                let full = Array::from_vec(matrix_set).into_shape((n, self.m)).unwrap();
+                matrix_sets_vec.push(full);
+            }
+
             let matrix_targets = self.flattened_matrix_targets.remove(&set_size).unwrap();
             let visit_probabilities = self.child_visit_probabilities.remove(&set_size).unwrap();
             
-            let matrix_sets = Array::from_vec(matrix_sets);
             let matrix_targets = Array::from_vec(matrix_targets);
             let visit_probabilities = Array::from_vec(visit_probabilities);
 
-            let mut matrix_sets = matrix_sets.into_shape((n, k * self.m)).unwrap();
             let mut matrix_targets = matrix_targets.into_shape((n, self.m)).unwrap();
             let mut visit_probabilities = visit_probabilities.into_shape((n, k * k)).unwrap();
             
@@ -60,33 +65,37 @@ impl TrainingExamplesBuilder {
             if (n > 1) {
                 for i in 0..n-1 {
                     let j = rng.gen_range(i..n);
-                    swap_rows(&mut matrix_sets, i, j);
+
+                    for z in 0..k {
+                        swap_rows(&mut matrix_sets_vec[z], i, j);
+                    }
                     swap_rows(&mut matrix_targets, i, j);
                     swap_rows(&mut visit_probabilities, i, j);
                 }
             }
 
-            let mut matrix_sets = matrix_sets.into_shape((n, k, self.m)).unwrap();
             let matrix_targets = matrix_targets.into_shape((n, self.m)).unwrap();
             let visit_probabilities = visit_probabilities.into_shape((n, k, k)).unwrap();
 
-            //Need to transpose matrix_sets
-            matrix_sets.swap_axes(0, 1);
-            matrix_sets = matrix_sets.as_standard_layout().into_owned();
+            let mut matrix_sets_tensors = Vec::new();
+            for matrix_set in matrix_sets_vec.drain(..) {
+                let flat_matrix_set = matrix_set.as_slice().unwrap();
+                let mut matrix_set_tensor = Tensor::try_from(flat_matrix_set).unwrap();
+                matrix_set_tensor = matrix_set_tensor.reshape(&[n as i64, self.m as i64]);
+                matrix_sets_tensors.push(matrix_set_tensor);
+            }
+            flattened_matrix_sets.insert(set_size, matrix_sets_tensors);
 
-            let flat_matrix_sets = matrix_sets.as_slice().unwrap();
+
             let flat_matrix_targets = matrix_targets.as_slice().unwrap();
             let flat_visit_probabilities = visit_probabilities.as_slice().unwrap();
 
-            let mut matrix_sets_tensor = Tensor::try_from(flat_matrix_sets).unwrap();
             let mut matrix_targets_tensor = Tensor::try_from(flat_matrix_targets).unwrap();
             let mut visit_probabilities_tensor = Tensor::try_from(flat_visit_probabilities).unwrap();
 
-            matrix_sets_tensor = matrix_sets_tensor.reshape(&[k as i64, n as i64, self.m as i64]);
             matrix_targets_tensor = matrix_targets_tensor.reshape(&[n as i64, self.m as i64]);
-            visit_probabilities_tensor = visit_probabilities_tensor.reshape(&[n as i64, k as i64, k as i64]);
+            visit_probabilities_tensor = visit_probabilities_tensor.reshape(&[n as i64, (k * k) as i64]);
 
-            flattened_matrix_sets.insert(set_size, matrix_sets_tensor);
             flattened_matrix_targets.insert(set_size, matrix_targets_tensor);
             child_visit_probabilities.insert(set_size, visit_probabilities_tensor);
         }
@@ -148,15 +157,20 @@ impl TrainingExamplesBuilder {
 
         let set_size = flattened_matrix_set.len();
         if (!self.flattened_matrix_sets.contains_key(&set_size)) {
-            self.flattened_matrix_sets.insert(set_size, Vec::new());
+            let mut matrix_set_vec = Vec::new();
+            for _ in 0..set_size {
+                matrix_set_vec.push(Vec::new());
+            }
+            self.flattened_matrix_sets.insert(set_size, matrix_set_vec);
+
             self.flattened_matrix_targets.insert(set_size, Vec::new());
             self.child_visit_probabilities.insert(set_size, Vec::new());
             self.num_samples.insert(set_size, 0);
         }
 
         let matrix_set_dest = self.flattened_matrix_sets.get_mut(&set_size).unwrap();
-        for flattened_matrix in flattened_matrix_set.drain(..) {
-            matrix_set_dest.extend_from_slice(flattened_matrix.as_slice().unwrap());
+        for (flattened_matrix, i) in flattened_matrix_set.drain(..).zip(0..set_size) {
+            matrix_set_dest[i].extend_from_slice(flattened_matrix.as_slice().unwrap());
         }
 
         self.flattened_matrix_targets.get_mut(&set_size).unwrap()
@@ -202,9 +216,12 @@ impl TrainingExamples {
         let mut named_tensors = Vec::new();
 
         named_tensors.push((String::from("sizings"), sizings));
-        for (sizing, tensor) in self.flattened_matrix_sets.drain() {
-            let name = format!("flattened_matrix_sets{}", sizing);
-            named_tensors.push((name, tensor));
+
+        for (sizing, mut tensor_vec) in self.flattened_matrix_sets.drain() {
+            for (tensor, i) in tensor_vec.drain(..).zip(0..sizing) {
+                let name = format!("{}flattened_matrix_sets{}", i, sizing);
+                named_tensors.push((name, tensor));
+            }
         }
         for (sizing, tensor) in self.flattened_matrix_targets.drain() {
             let name = format!("flattened_matrix_targets{}", sizing);
@@ -237,15 +254,21 @@ impl TrainingExamples {
                 for i in 0..num_sizings {
                     let sizing = sizings.int64_value(&[i as i64]) as usize;
 
-                    let flattened_matrix_set_name = format!("flattened_matrix_sets{}", sizing);
+                    let mut flattened_matrix_set_vec = Vec::new();
+                    for j in 0..sizing {
+                        let flattened_matrix_set_name = format!("{}flattened_matrix_sets{}", j, sizing);
+                        let flattened_matrix_set = named_tensor_map.remove(&flattened_matrix_set_name).unwrap();
+                        flattened_matrix_set_vec.push(flattened_matrix_set);
+                    }
+                    flattened_matrix_sets.insert(sizing, flattened_matrix_set_vec);
+
+
                     let flattened_matrix_target_name = format!("flattened_matrix_targets{}", sizing);
                     let child_visit_probability_name = format!("child_visit_probabilities{}", sizing);
 
-                    let flattened_matrix_set = named_tensor_map.remove(&flattened_matrix_set_name).unwrap();
-                    let flattened_matrix_target = named_tensor_map.remove(&flattened_matrix_target_name).unwrap();
+                                        let flattened_matrix_target = named_tensor_map.remove(&flattened_matrix_target_name).unwrap();
                     let child_visit_probability = named_tensor_map.remove(&child_visit_probability_name).unwrap();
 
-                    flattened_matrix_sets.insert(sizing, flattened_matrix_set);
                     flattened_matrix_targets.insert(sizing, flattened_matrix_target);
                     child_visit_probabilities.insert(sizing, child_visit_probability);
 

@@ -51,30 +51,34 @@ pub fn concat_then_seq() -> ConcatThenSequential {
 
 #[derive(Debug)]
 pub struct LinearResidual {
-    pub ws : Tensor,
-    pub bs : Tensor
+    pub first_ws : Tensor,
+    pub second_ws : Tensor,
+    pub first_bs : Tensor,
+    pub second_bs : Tensor
 }
 
 pub fn linear_residual<'a, T : Borrow<Path<'a>>>(network_path : T, 
                       dim : i64) -> LinearResidual {
     let network_path = network_path.borrow();
     let bound = 1.0 / (dim as f64).sqrt();
-    let bs_init = Init::Uniform {
-        lo: -bound,
-        up: bound
-    };
-    let bs = network_path.var("bias", &[dim], bs_init);
-    let ws = network_path.var("weight", &[dim, dim], Init::KaimingUniform);
+
+    let first_bs = network_path.var("first_bias", &[dim], Init::Uniform {lo : -bound, up : bound});
+    let second_bs = network_path.var("second_bias", &[dim], Init::Uniform {lo : -bound, up : bound});
+    let first_ws = network_path.var("first_weights", &[dim, dim], Init::KaimingUniform);
+    let second_ws = network_path.var("second_weights", &[dim, dim], Init::KaimingUniform);
     LinearResidual {
-        ws,
-        bs
+        first_ws,
+        second_ws,
+        first_bs,
+        second_bs
     }
 }
 
 impl Module for LinearResidual {
     fn forward(&self, xs : &Tensor) -> Tensor {
-        let pre_activation = xs.matmul(&self.ws.tr()) + &self.bs;
+        let pre_activation = xs.matmul(&self.first_ws.tr()) + &self.first_bs;
         let post_activation = pre_activation.leaky_relu();
-        post_activation + xs
+        let post_weights = post_activation.matmul(&self.second_ws.tr()) + &self.second_bs;
+        post_weights + xs
     }
 }
