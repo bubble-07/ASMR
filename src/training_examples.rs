@@ -8,6 +8,7 @@ use crate::array_utils::*;
 use std::convert::{TryFrom, TryInto};
 use std::path::Path;
 use crate::params::*;
+use crate::turn_data::*;
 
 pub struct TrainingExamples {
     ///Mapping from set size to a K-element list of tensors of dims NxM,
@@ -106,56 +107,17 @@ impl TrainingExamplesBuilder {
         }
     }
 
-
-    fn permute<R : Rng + ?Sized>(mut flattened_matrix_set : Vec<Array1<f32>>, 
-                                 child_visit_probabilities : Array2<f32>,
-                                 rng : &mut R) -> (Vec<Array1<f32>>, Array2<f32>) {
-        let k = flattened_matrix_set.len();
-        let mut result_flattened_matrix_set = Vec::new();
-        for _ in 0..k {
-            result_flattened_matrix_set.push(Option::None);
-        }
-        let mut result_visit_probabilities = child_visit_probabilities.clone();
-
-        let mut permutation : Vec<usize> = (0..k).collect();
-        permutation.shuffle(rng);
-
-        for (flattened_matrix, i) in flattened_matrix_set.drain(..).zip(0..k) {
-            let dest_index = permutation[i];
-            result_flattened_matrix_set[dest_index] = Option::Some(flattened_matrix);
-        }
-
-        let result_flattened_matrix_set = result_flattened_matrix_set.drain(..).map(|x| x.unwrap()).collect();
-
-        for i in 0..k {
-            let dest_i = permutation[i];
-            for j in 0..k {
-                let dest_j = permutation[j];
-                result_visit_probabilities[[dest_i, dest_j]] = child_visit_probabilities[[i, j]];
-            }
-        }
-
-        (result_flattened_matrix_set, result_visit_probabilities)
-    }
-
-    fn add_game_data<R : Rng + ?Sized>(&mut self, mut game_data : GameData, rng : &mut R) {
-        let flattened_matrix_target = game_data.flattened_matrix_target;
-        for (flattened_matrix_set, child_visit_probabilities) in 
-            game_data.flattened_matrix_sets.drain(..)
-        .zip(game_data.child_visit_probabilities.drain(..)) {
-
-            let (flattened_matrix_set, child_visit_probabilities) = 
-                Self::permute(flattened_matrix_set, child_visit_probabilities, rng);
-
-            self.add_matrix_data(flattened_matrix_set, flattened_matrix_target.view(), 
-                                 child_visit_probabilities);
+    fn add_game_data<R : Rng + ?Sized>(&mut self, game_data : GameData, rng : &mut R) {
+        let mut turn_data_vec = game_data.get_turn_data();
+        for turn_data in turn_data_vec.drain(..) {
+            let permuted_turn_data = turn_data.permute(rng);
+            self.add_turn_data(permuted_turn_data);
         }
     }
 
-    fn add_matrix_data(&mut self, mut flattened_matrix_set : Vec<Array1<f32>>, 
-                       flattened_matrix_target : ArrayView1<f32>, child_visit_probabilities : Array2<f32>) {
+    fn add_turn_data(&mut self, mut turn_data : TurnData) {
 
-        let set_size = flattened_matrix_set.len();
+        let set_size = turn_data.flattened_matrix_set.len();
         if (!self.flattened_matrix_sets.contains_key(&set_size)) {
             let mut matrix_set_vec = Vec::new();
             for _ in 0..set_size {
@@ -169,15 +131,15 @@ impl TrainingExamplesBuilder {
         }
 
         let matrix_set_dest = self.flattened_matrix_sets.get_mut(&set_size).unwrap();
-        for (flattened_matrix, i) in flattened_matrix_set.drain(..).zip(0..set_size) {
+        for (flattened_matrix, i) in turn_data.flattened_matrix_set.drain(..).zip(0..set_size) {
             matrix_set_dest[i].extend_from_slice(flattened_matrix.as_slice().unwrap());
         }
 
         self.flattened_matrix_targets.get_mut(&set_size).unwrap()
-            .extend_from_slice(flattened_matrix_target.as_slice().unwrap());
+            .extend_from_slice(turn_data.flattened_matrix_target.as_slice().unwrap());
 
         self.child_visit_probabilities.get_mut(&set_size).unwrap()
-            .extend_from_slice(child_visit_probabilities.as_slice().unwrap());
+            .extend_from_slice(turn_data.child_visit_probabilities.as_slice().unwrap());
 
         let prev_num_samples = self.num_samples.remove(&set_size).unwrap(); 
         self.num_samples.insert(set_size, prev_num_samples + 1);

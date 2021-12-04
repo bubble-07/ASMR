@@ -7,6 +7,7 @@ use ndarray_rand::RandomExt;
 use ndarray::{Array, ArrayBase};
 use std::convert::TryInto;
 use serde::{Serialize, Deserialize};
+use crate::synthetic_data::*;
 
 #[derive(Serialize, Deserialize)]
 pub struct Params {
@@ -67,28 +68,18 @@ impl Params {
     }
 
     fn generate_target_matrix<R : Rng + ?Sized>(matrix_set : &MatrixSet, 
-                                                ground_truth_num_moves : u64, rng : &mut R) -> Array2<f32> {
-        let mut matrix_set = matrix_set.clone();
-        for _ in 0..ground_truth_num_moves {
-            let size = matrix_set.size();
-            let left_index = rng.gen_range(0..size);
-            let right_index = rng.gen_range(0..size);
-            
-            let left_matrix = matrix_set.get(left_index);
-            let right_matrix = matrix_set.get(right_index);
-
-            let matrix = left_matrix.dot(&right_matrix);
-
-            matrix_set = matrix_set.add_matrix(matrix);
-        }
-        matrix_set.get_newest_matrix().to_owned()
+                                                ground_truth_num_moves : usize, 
+                                                rng : &mut R) -> Array2<f32> {
+        let matrix_set_clone = matrix_set.clone();
+        let game_path = GamePath::generate_game_path(matrix_set_clone, ground_truth_num_moves, rng);
+        game_path.get_target()
     }
 
     pub fn generate_random_game<R : Rng + ?Sized>(&self, rng : &mut R) -> GameState {
         let initial_set_size : usize = rng.gen_range(self.min_initial_set_size..=self.max_initial_set_size);
 
         let geom_distr = Geometric::new(self.success_probability_ground_truth_num_moves).unwrap();
-        let additional_moves_beyond_one = geom_distr.sample(rng);
+        let additional_moves_beyond_one = geom_distr.sample(rng) as usize;
         let ground_truth_num_moves = additional_moves_beyond_one + 1;
 
         let remaining_turns = self.max_num_turns;

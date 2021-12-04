@@ -3,6 +3,8 @@
 #![allow(unused_imports)]
 #![allow(unused_parens)]
 
+mod synthetic_data;
+mod turn_data;
 mod game_data;
 mod game_tree;
 mod normal_inverse_chi_squared;
