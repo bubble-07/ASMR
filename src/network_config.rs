@@ -241,7 +241,7 @@ impl NetworkConfig {
         let flattened_unnormalized_policy = computed_unnormalized_policy.reshape(&[n as i64, (k * k) as i64]);
         let log_softmaxed = flattened_unnormalized_policy.log_softmax(1, Kind::Float);
 
-        target_policy.print();
+        log_softmaxed.print();
 
         let one_over_n = 1.0f32 / (n as f32);
         let flattened_log_softmaxed = one_over_n * log_softmaxed.reshape(&[(n * k * k) as i64]);

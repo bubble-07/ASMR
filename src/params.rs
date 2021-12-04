@@ -37,7 +37,9 @@ pub struct Params {
     ///Number of epochs for training
     pub train_epochs : usize,
     ///Step-size for Adam optimizer
-    pub train_step_size : f64 
+    pub train_step_size : f64,
+    ///Number of synthetic training games
+    pub num_synthetic_training_games : usize
 }
 
 impl Params {
@@ -75,12 +77,27 @@ impl Params {
         game_path.get_target()
     }
 
-    pub fn generate_random_game<R : Rng + ?Sized>(&self, rng : &mut R) -> GameState {
-        let initial_set_size : usize = rng.gen_range(self.min_initial_set_size..=self.max_initial_set_size);
+    fn generate_initial_set_size<R : Rng + ?Sized>(&self, rng : &mut R) -> usize {
+        rng.gen_range(self.min_initial_set_size..=self.max_initial_set_size)
+    }
 
+    fn generate_ground_truth_num_moves<R : Rng + ?Sized>(&self, rng : &mut R) -> usize {
         let geom_distr = Geometric::new(self.success_probability_ground_truth_num_moves).unwrap();
         let additional_moves_beyond_one = geom_distr.sample(rng) as usize;
-        let ground_truth_num_moves = additional_moves_beyond_one + 1;
+        additional_moves_beyond_one + 1
+    }
+
+    pub fn generate_random_game_path<R : Rng + ?Sized>(&self, rng : &mut R) -> GamePath {
+        let initial_set_size = self.generate_initial_set_size(rng);
+        let matrix_set = self.generate_matrix_set(initial_set_size, rng);
+        let ground_truth_num_moves = self.generate_ground_truth_num_moves(rng);
+        
+        GamePath::generate_game_path(matrix_set, ground_truth_num_moves, rng)
+    }
+
+    pub fn generate_random_game<R : Rng + ?Sized>(&self, rng : &mut R) -> GameState {
+        let initial_set_size = self.generate_initial_set_size(rng);
+        let ground_truth_num_moves = self.generate_ground_truth_num_moves(rng);
 
         let remaining_turns = self.max_num_turns;
         let matrix_set = self.generate_matrix_set(initial_set_size, rng);

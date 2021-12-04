@@ -36,6 +36,9 @@ ASMR run_game [game_config_path] [network_config_path] [game_data_output_path] [
     and runs a game, outputting finalized game-data (training data) to the given output path.
     If [dotfile_output_path]? is present, this will also output a .dot file visualization
     of the game-tree once the simulation has completed.
+ASMR gen_synthetic_training_data [game_config_path] [training_data_output_path]
+    Using the given game configuration json, randomly-generates a bunch of synthetic
+    games, outputting the finalized training data to the given output path
 ASMR gen_network_config [game_config_path] [network_config_output_path]
     Using the given game configuration json, generates a randomly-initialized
     network configuration and outputs it to the given path
@@ -65,6 +68,15 @@ fn main() {
     match (maybe_game_config) {
         Result::Ok(params) => {
             match &command[..] {
+                "gen_synthetic_training_data" => {
+                    if (args.len() < 4) {
+                        eprintln!("error: not enough arguments");
+                        print_help();
+                        return;
+                    }
+                    let training_data_output_path = &args[3];
+                    gen_synthetic_training_data_command(params, training_data_output_path);
+                }
                 "distill_training_data" => {
                     if (args.len() < 5) {
                         eprintln!("error: not enough arguments");
@@ -250,6 +262,28 @@ fn run_game_command(params : Params,
         },
         Result::Err(err) => {
             println!("Game data serialization error: {}", err);
+        }
+    }
+}
+
+fn gen_synthetic_training_data_command(params : Params, training_data_output_path : &str) {
+    let mut rng = rand::thread_rng();
+    let mut game_datas : Vec<GameData> = Vec::new();
+    for _ in 0..params.num_synthetic_training_games {
+        let game_path = params.generate_random_game_path(&mut rng);
+        let game_data = game_path.get_game_data();
+        game_datas.push(game_data);
+    }
+    let training_examples = TrainingExamples::from_game_data(&params, game_datas, &mut rng);
+
+    let output_path = Path::new(training_data_output_path);
+    let maybe_save_result = training_examples.save(&output_path);
+    match (maybe_save_result) {
+        Result::Ok(_) => {
+            println!("Successfully generated and saved synthetic training data");
+        },
+        Result::Err(err) => {
+            eprintln!("Failed to write synthetic training data: {}", err);
         }
     }
 }

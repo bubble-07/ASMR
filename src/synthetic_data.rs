@@ -35,22 +35,28 @@ impl GamePath {
         let mut child_visit_probabilities = Vec::new();
 
         for (current_index_set, mut successor_index_set) in path_situations.drain() {
+            let mut index_remappings = Vec::new();
             let mut flattened_matrices = Vec::new();
             for index in 0..current_index_set.len() {
                 if (current_index_set[index]) {
                     let flattened_matrix = flatten_matrix(added_matrices.get(index)).to_owned();
+                    index_remappings.push(Option::Some(flattened_matrices.len()));
                     flattened_matrices.push(flattened_matrix);
+                } else {
+                    index_remappings.push(Option::None);
                 }
             }
 
-            let mut child_visit_probability_mat = Array::zeros((self.get_size(), self.get_size()));
+            let mut child_visit_probability_mat = Array::zeros((flattened_matrices.len(), flattened_matrices.len()));
             let increment : f32 = 1.0f32 / (successor_index_set.len() as f32);
             for index in successor_index_set.drain() {
                 let node_index = self.to_node_index(index);
                 let node = &self.nodes[node_index];
                 let left_index = node.left_index;
                 let right_index = node.right_index;
-                child_visit_probability_mat[[left_index, right_index]] += increment;
+                let remapped_left_index = index_remappings[left_index].unwrap();
+                let remapped_right_index = index_remappings[right_index].unwrap();
+                child_visit_probability_mat[[remapped_left_index, remapped_right_index]] += increment;
             }
 
             flattened_matrix_sets.push(flattened_matrices);
