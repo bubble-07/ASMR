@@ -21,7 +21,9 @@ pub struct NetworkConfig {
     ///F (combined) x F (single) -> 2F
     left_policy_extraction_net : ConcatThenSequential,
     ///F (combined) x F (single) -> 2F
-    right_policy_extraction_net : ConcatThenSequential
+    right_policy_extraction_net : ConcatThenSequential,
+    ///Single scalar to scale the unnormalized policy after the dot-products
+    policy_confidence_scaling : Tensor
 }
 
 pub struct RolloutState {
@@ -47,11 +49,14 @@ impl NetworkConfig {
         let combiner_net = combiner_net(params, vs / "combiner");
         let left_policy_extraction_net = half_policy_extraction_net(params, vs / "left_policy_vector_supplier");
         let right_policy_extraction_net = half_policy_extraction_net(params, vs / "right_policy_vector_supplier");
+        let policy_confidence_scaling = vs.var("policy_confidence_scaling", &[], 
+                                               Init::Uniform {lo : 0.5, up : 1.0});
         NetworkConfig {
             injector_net,
             combiner_net,
             left_policy_extraction_net,
-            right_policy_extraction_net
+            right_policy_extraction_net,
+            policy_confidence_scaling
         }
     }
     pub fn start_rollout(&self, game_state : GameState) -> RolloutState {
@@ -186,7 +191,8 @@ impl NetworkConfig {
         let left_policy_mat = unnormalized_left_policy_mat.tanh();
         let right_policy_mat = unnormalized_right_policy_mat.tanh();
         
-        let unnormalized_policy_mat = left_policy_mat.matmul(&right_policy_mat);
+        let mut unnormalized_policy_mat = left_policy_mat.matmul(&right_policy_mat);
+        unnormalized_policy_mat *= &self.policy_confidence_scaling.celu();
         unnormalized_policy_mat
     }
 

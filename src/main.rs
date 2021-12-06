@@ -381,7 +381,16 @@ fn train_command(params : Params, network_config_path : &str, training_data_path
                                                                    &mut opt, &mut rng);
                 println!("epoch: {} train loss: {}", epoch, train_loss);
 
-                //TODO: After each epoch, write out the network config again
+                //Write out the updated network weights
+                let maybe_save_result = vs.save(&network_path);
+                match (maybe_save_result) {
+                    Result::Ok(_) => {
+                        println!("Successfully wrote out the updated network configuration");
+                    },
+                    Result::Err(e) => {
+                        eprintln!("Failed to write out updated network configuration: {}", e);
+                    }
+                }
             }
         },
         Result::Err(err) => {
