@@ -364,15 +364,21 @@ fn train_command(params : Params, network_config_path : &str, training_data_path
         }
     }
 
+    let mut rng = rand::thread_rng();
     let data_path = Path::new(training_data_path);
     let maybe_training_examples = TrainingExamples::load(&data_path);
     match (maybe_training_examples) {
         Result::Ok(training_examples) => { 
             println!("Successfully loaded training examples");
 
-            let mut opt = Adam::default().build(&vs, 1e-3).unwrap();
+            let adam = Adam {
+                wd : params.weight_decay_factor,
+                ..Adam::default()
+            };
+            let mut opt = adam.build(&vs, params.train_step_size).unwrap();
             for epoch in 0..params.train_epochs {
-                let train_loss = network_config.run_training_epoch(&training_examples, &mut opt);
+                let train_loss = network_config.run_training_epoch(&params, &training_examples, 
+                                                                   &mut opt, &mut rng);
                 println!("epoch: {} train loss: {}", epoch, train_loss);
 
                 //TODO: After each epoch, write out the network config again

@@ -39,7 +39,11 @@ pub struct Params {
     ///Step-size for Adam optimizer
     pub train_step_size : f64,
     ///Number of synthetic training games
-    pub num_synthetic_training_games : usize
+    pub num_synthetic_training_games : usize,
+    ///Weight decay factor
+    pub weight_decay_factor : f64,
+    ///Batch size for training
+    pub batch_size : usize
 }
 
 impl Params {

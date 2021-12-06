@@ -1,5 +1,5 @@
 use tch::{no_grad_guard, nn, nn::Init, nn::Module, Tensor, nn::Path, nn::Sequential, kind::Kind,
-          nn::Optimizer};
+          nn::Optimizer, IndexOp, Device};
 use crate::network::*;
 use crate::neural_utils::*;
 use crate::game_state::*;
@@ -241,8 +241,6 @@ impl NetworkConfig {
         let flattened_unnormalized_policy = computed_unnormalized_policy.reshape(&[n as i64, (k * k) as i64]);
         let log_softmaxed = flattened_unnormalized_policy.log_softmax(1, Kind::Float);
 
-        log_softmaxed.print();
-
         let one_over_n = 1.0f32 / (n as f32);
         let flattened_log_softmaxed = one_over_n * log_softmaxed.reshape(&[(n * k * k) as i64]);
         let flattened_target_policy = target_policy.reshape(&[(n * k * k) as i64]);
@@ -250,28 +248,73 @@ impl NetworkConfig {
 
         -inner_product
     }
-    pub fn run_training_epoch(&self, training_examples : &TrainingExamples, opt : &mut Optimizer) -> f64 {
-        //TODO: Break the data up into minibatches, too!
+    pub fn run_training_epoch<R : Rng + ?Sized>(&self, params : &Params, 
+                              training_examples : &TrainingExamples, 
+                              opt : &mut Optimizer, rng : &mut R) -> f64 {
         let mut total_loss = 0f64;
+
+        let set_sizings : Vec<usize> = training_examples.flattened_matrix_sets.keys().map(|x| *x).collect();
+        let mut num_samples_per_set = Vec::new();
+
+        let mut loss_weightings : Vec<f32> = Vec::new();
         let mut total_n = 0;
-
-        let sizings : Vec<usize> = training_examples.flattened_matrix_sets.keys().map(|x| *x).collect();
-
-        for sizing in sizings {
-            let flattened_matrix_sets = training_examples.flattened_matrix_sets.get(&sizing).unwrap();
-            let flattened_matrix_targets = training_examples.flattened_matrix_targets.get(&sizing).unwrap();
-            let child_visit_probabilities = training_examples.child_visit_probabilities.get(&sizing).unwrap();
-
-            let n = child_visit_probabilities.size()[0];
+        for set_sizing in set_sizings.iter() {
+            let flattened_matrix_targets = training_examples.flattened_matrix_targets.get(set_sizing).unwrap();
+            let n = flattened_matrix_targets.size()[0];
+            num_samples_per_set.push(n as usize);
+            loss_weightings.push(n as f32);
             total_n += n;
-            
-            let normalized_loss = self.get_loss_from_scratch(flattened_matrix_sets, flattened_matrix_targets,
-                                             child_visit_probabilities);
-            total_loss += f64::from(&normalized_loss) * (n as f64);
-
-            opt.backward_step(&normalized_loss);
         }
-        total_loss /= total_n as f64;
+
+        let maximal_sizing = num_samples_per_set.iter().max().unwrap();
+        
+        for i in 0..set_sizings.len() {
+            loss_weightings[i] /= total_n as f32;
+        }
+
+        let num_iters = maximal_sizing / params.batch_size;
+        let device = Device::Cpu;
+
+        for _ in 0..num_iters {
+            let mut iter_loss = Tensor::scalar_tensor(0f64, (Kind::Float, device));
+            for (set_sizing, loss_weighting) in set_sizings.iter().zip(loss_weightings.iter()) {
+                let flattened_matrix_sets = training_examples.flattened_matrix_sets.get(set_sizing).unwrap();
+                let flattened_matrix_targets = training_examples.flattened_matrix_targets.get(set_sizing).unwrap();
+                let child_visit_probabilities = training_examples.child_visit_probabilities.get(set_sizing).unwrap();
+
+                let n = flattened_matrix_targets.size()[0] as usize;
+                let max_batch_index = n / params.batch_size;
+                let batch_index = if (max_batch_index == 0) {
+                    0
+                } else {
+                    rng.gen_range(0..max_batch_index)
+                };
+                let start = (batch_index * params.batch_size) as i64;
+                let size = std::cmp::min(params.batch_size as i64, n as i64);
+
+
+                let matrix_sets_slices : Vec<Tensor> = flattened_matrix_sets.iter().map(|x|
+                                          x.i(start..start + size).to_device(device).detach())
+                                                                     .collect();
+                let matrix_targets_slices = flattened_matrix_targets.i(start..start + size)
+                                            .to_device(device).detach();
+                let child_visit_probabilities_slices = child_visit_probabilities.i(start..start + size)
+                                            .to_device(device).detach();
+
+
+                
+                let mut normalized_loss = self.get_loss_from_scratch(&matrix_sets_slices, &matrix_targets_slices,
+                                                 &child_visit_probabilities_slices);
+                normalized_loss *= *loss_weighting;
+                iter_loss += normalized_loss;
+            }
+
+            let float_iter_loss = f64::from(&iter_loss);
+            println!("Iter loss: {}", float_iter_loss);
+
+            opt.backward_step(&iter_loss);
+            total_loss += float_iter_loss / (num_iters as f64);
+        }
         total_loss
     }
 }

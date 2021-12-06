@@ -18,7 +18,7 @@ pub struct TrainingExamples {
     ///Mapping from set size to a tensor of dims NxM
     pub flattened_matrix_targets : HashMap<usize, Tensor>,
     ///Mapping from set size to a tensor of dims Nx(K*K)
-    pub child_visit_probabilities : HashMap<usize, Tensor>,
+    pub child_visit_probabilities : HashMap<usize, Tensor>
 }
 
 struct TrainingExamplesBuilder {
@@ -209,7 +209,7 @@ impl TrainingExamples {
 
                 let mut named_tensor_map = HashMap::new(); 
                 for (name, tensor) in named_tensors.drain(..) {
-                    named_tensor_map.insert(name, tensor);
+                    named_tensor_map.insert(name, tensor.detach());
                 }
                 let sizings = named_tensor_map.remove("sizings").unwrap();
                 let num_sizings = sizings.size()[0];
