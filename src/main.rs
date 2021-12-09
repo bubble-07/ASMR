@@ -268,13 +268,15 @@ fn run_game_command(params : Params,
 
 fn gen_synthetic_training_data_command(params : Params, training_data_output_path : &str) {
     let mut rng = rand::thread_rng();
-    let mut game_datas : Vec<GameData> = Vec::new();
+    let mut builder = TrainingExamplesBuilder::new(&params);
+
     for _ in 0..params.num_synthetic_training_games {
         let game_path = params.generate_random_game_path(&mut rng);
         let game_data = game_path.get_game_data();
-        game_datas.push(game_data);
+
+        builder.add_game_data(game_data, &mut rng); 
     }
-    let training_examples = TrainingExamples::from_game_data(&params, game_datas, &mut rng);
+    let training_examples = builder.build(&mut rng);
 
     let output_path = Path::new(training_data_output_path);
     let maybe_save_result = training_examples.save(&output_path);
@@ -292,7 +294,8 @@ fn distill_training_data_command(params : Params, game_data_root : &str, trainin
     let game_data_root_path = Path::new(game_data_root);
     let maybe_dir_listing = fs::read_dir(&game_data_root_path);
 
-    let mut loaded_game_datas : Vec<GameData> = Vec::new();
+    let mut rng = rand::thread_rng();
+    let mut builder = TrainingExamplesBuilder::new(&params);
 
     match (maybe_dir_listing) {
         Result::Ok(dir_listing) => {
@@ -306,7 +309,7 @@ fn distill_training_data_command(params : Params, game_data_root : &str, trainin
                                 let maybe_game_data = bincode::deserialize::<GameData>(&serialized_game_data);
                                 match (maybe_game_data) {
                                     Result::Ok(game_data) => {
-                                        loaded_game_datas.push(game_data);
+                                        builder.add_game_data(game_data, &mut rng);
                                     },
                                     Result::Err(err) => {
                                         eprintln!("Failed to deserialize contents of a file in the directory: {}", err);
@@ -332,8 +335,7 @@ fn distill_training_data_command(params : Params, game_data_root : &str, trainin
             return;
         }
     }
-    let mut rng = rand::thread_rng();
-    let training_examples = TrainingExamples::from_game_data(&params, loaded_game_datas, &mut rng);
+    let training_examples = builder.build(&mut rng);
 
     let output_path = Path::new(training_data_output_path);
     let maybe_save_result = training_examples.save(&output_path);

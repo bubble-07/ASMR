@@ -21,7 +21,7 @@ pub struct TrainingExamples {
     pub child_visit_probabilities : HashMap<usize, Tensor>
 }
 
-struct TrainingExamplesBuilder {
+pub struct TrainingExamplesBuilder {
     ///K elements, axes are NxM
     pub flattened_matrix_sets : HashMap<usize, Vec<Vec<f32>>>,
     ///axes are NxM
@@ -34,6 +34,19 @@ struct TrainingExamplesBuilder {
 }
 
 impl TrainingExamplesBuilder {
+    pub fn new(params : &Params) -> TrainingExamplesBuilder {
+        let flattened_matrix_sets = HashMap::new();
+        let flattened_matrix_targets = HashMap::new();
+        let child_visit_probabilities = HashMap::new();
+        let num_samples = HashMap::new();
+        TrainingExamplesBuilder {
+            flattened_matrix_sets,
+            flattened_matrix_targets,
+            child_visit_probabilities,
+            num_samples,
+            m : params.get_flattened_matrix_dim() as usize
+        }
+    }
     pub fn build<R : Rng + ?Sized>(mut self, rng : &mut R) -> TrainingExamples {
         let mut flattened_matrix_sets = HashMap::new();
         let mut flattened_matrix_targets = HashMap::new();
@@ -107,7 +120,7 @@ impl TrainingExamplesBuilder {
         }
     }
 
-    fn add_game_data<R : Rng + ?Sized>(&mut self, game_data : GameData, rng : &mut R) {
+    pub fn add_game_data<R : Rng + ?Sized>(&mut self, game_data : GameData, rng : &mut R) {
         let mut turn_data_vec = game_data.get_turn_data();
         for turn_data in turn_data_vec.drain(..) {
             let permuted_turn_data = turn_data.permute(rng);
@@ -115,7 +128,7 @@ impl TrainingExamplesBuilder {
         }
     }
 
-    fn add_turn_data(&mut self, mut turn_data : TurnData) {
+    pub fn add_turn_data(&mut self, mut turn_data : TurnData) {
 
         let set_size = turn_data.flattened_matrix_set.len();
         if (!self.flattened_matrix_sets.contains_key(&set_size)) {
@@ -148,26 +161,6 @@ impl TrainingExamplesBuilder {
 }
 
 impl TrainingExamples {
-    pub fn from_game_data<R : Rng + ?Sized>(params : &Params, mut game_datas : Vec<GameData>, rng : &mut R) -> TrainingExamples {
-        let flattened_matrix_sets = HashMap::new();
-        let flattened_matrix_targets = HashMap::new();
-        let child_visit_probabilities = HashMap::new();
-        let num_samples = HashMap::new();
-        let mut builder = TrainingExamplesBuilder {
-            flattened_matrix_sets,
-            flattened_matrix_targets,
-            child_visit_probabilities,
-            num_samples,
-            m : params.get_flattened_matrix_dim() as usize
-        };
-
-        for game_data in game_datas.drain(..) {
-            builder.add_game_data(game_data, rng);
-        }
-
-        builder.build(rng)
-    }
-
     pub fn save<T : AsRef<Path>>(mut self, path : T) -> Result<(), String> {
         let mut sizings = Vec::new();
         for sizing in self.flattened_matrix_sets.keys() {
