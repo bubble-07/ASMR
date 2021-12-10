@@ -1,4 +1,4 @@
-use tch::{nn, nn::Init, nn::Module, Tensor, nn::Sequential};
+use tch::{nn, no_grad_guard, nn::Init, nn::Module, Tensor, nn::Sequential};
 use crate::game_data::*;
 use std::collections::HashMap;
 use rand::Rng;
@@ -31,6 +31,52 @@ pub struct TrainingExamplesBuilder {
     ///Maps from the set size to the number of samples for that set size
     pub num_samples : HashMap<usize, usize>,
     pub m : usize
+}
+
+impl TrainingExamples {
+    fn concat_consume(a : Tensor, b : Tensor) -> Tensor {
+        let result = Tensor::cat(&[a, b], 0);
+        result
+    }
+    pub fn merge(&mut self, mut other : TrainingExamples) {
+        let _guard = no_grad_guard();
+        let mut set_sizes : Vec<usize> = other.flattened_matrix_sets.keys().map(|x| *x).collect();
+        for set_size in set_sizes.drain(..) {
+            let mut other_flattened_matrix_sets = other.flattened_matrix_sets.remove(&set_size).unwrap();
+            let other_flattened_matrix_targets = other.flattened_matrix_targets.remove(&set_size).unwrap();
+            let other_child_visit_probabilities = other.child_visit_probabilities.remove(&set_size).unwrap();
+            //First, determine if we already have the set size.
+            //If so, we'll append, but otherwise, we'll move
+            if (self.flattened_matrix_sets.contains_key(&set_size)) {
+                //Need to append the contents from the other to this one
+                let mut my_flattened_matrix_sets = self.flattened_matrix_sets.remove(&set_size).unwrap();
+                let my_flattened_matrix_targets = self.flattened_matrix_targets.remove(&set_size).unwrap();
+                let my_child_visit_probabilities = self.child_visit_probabilities.remove(&set_size).unwrap();
+
+                let flattened_matrix_targets = Self::concat_consume(my_flattened_matrix_targets,
+                                                                    other_flattened_matrix_targets);
+                let child_visit_probabilities = Self::concat_consume(my_child_visit_probabilities,
+                                                                     other_child_visit_probabilities);
+                let mut flattened_matrix_sets = Vec::with_capacity(set_size);
+                for (my_flattened_matrix_set, other_flattened_matrix_set) in
+                    my_flattened_matrix_sets.drain(..).zip(other_flattened_matrix_sets.drain(..)) {
+
+                    let flattened_matrix_set = Self::concat_consume(my_flattened_matrix_set, 
+                                                                    other_flattened_matrix_set);
+                    flattened_matrix_sets.push(flattened_matrix_set);
+                }
+
+                self.flattened_matrix_sets.insert(set_size, flattened_matrix_sets);
+                self.flattened_matrix_targets.insert(set_size, flattened_matrix_targets);
+                self.child_visit_probabilities.insert(set_size, child_visit_probabilities);
+            } else {
+                //Need to move the contents from other into this one
+                self.flattened_matrix_sets.insert(set_size, other_flattened_matrix_sets);
+                self.flattened_matrix_targets.insert(set_size, other_flattened_matrix_targets);
+                self.child_visit_probabilities.insert(set_size, other_child_visit_probabilities);
+            }
+        }
+    }
 }
 
 impl TrainingExamplesBuilder {

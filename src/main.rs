@@ -39,11 +39,14 @@ ASMR run_game [game_config_path] [network_config_path] [game_data_output_path] [
 ASMR gen_synthetic_training_data [game_config_path] [training_data_output_path]
     Using the given game configuration json, randomly-generates a bunch of synthetic
     games, outputting the finalized training data to the given output path
+ASMR add_training_data [game_config_path] [training_data_to_add_path] [training_data_output_path]
+    Using the given game configuration json, concatenates the training data
+    at the given path to the training data at the output path, overwriting the destination
 ASMR gen_network_config [game_config_path] [network_config_output_path]
     Using the given game configuration json, generates a randomly-initialized
     network configuration and outputs it to the given path
-ASMR distill_training_data [game_config_path] [game_data_root] [training_data_output_path]
-    Using the given game configuration json, distills all training data files under the
+ASMR distill_game_data [game_config_path] [game_data_root] [training_data_output_path]
+    Using the given game configuration json, distills all game data files under the
     given game data root directory into bona fide training data, which is output
     into a file at the given specified output path
 ASMR train [game_config_path] [network_config_path] [training_data_path]
@@ -68,6 +71,16 @@ fn main() {
     match (maybe_game_config) {
         Result::Ok(params) => {
             match &command[..] {
+                "add_training_data" => {
+                    if (args.len() < 5) {
+                        eprintln!("error: not enough arguments");
+                        print_help();
+                        return;
+                    }
+                    let training_data_to_add_path = &args[3];
+                    let training_data_output_path = &args[4];
+                    add_training_data_command(params, training_data_to_add_path, training_data_output_path);
+                },
                 "gen_synthetic_training_data" => {
                     if (args.len() < 4) {
                         eprintln!("error: not enough arguments");
@@ -77,7 +90,7 @@ fn main() {
                     let training_data_output_path = &args[3];
                     gen_synthetic_training_data_command(params, training_data_output_path);
                 }
-                "distill_training_data" => {
+                "distill_game_data" => {
                     if (args.len() < 5) {
                         eprintln!("error: not enough arguments");
                         print_help();
@@ -85,7 +98,7 @@ fn main() {
                     }
                     let game_data_root = &args[3];
                     let training_data_output_path = &args[4];
-                    distill_training_data_command(params, game_data_root, training_data_output_path);
+                    distill_game_data_command(params, game_data_root, training_data_output_path);
                 },
                 "run_game" => {
                     if (args.len() < 5) {
@@ -266,6 +279,40 @@ fn run_game_command(params : Params,
     }
 }
 
+fn add_training_data_command(_params : Params, training_data_to_add_path : &str, training_data_output_path : &str) {
+    let to_add_path = Path::new(training_data_to_add_path);
+    let output_path = Path::new(training_data_output_path);
+
+    let maybe_training_examples_to_add = TrainingExamples::load(&to_add_path);
+    let training_examples_to_add = match (maybe_training_examples_to_add) {
+        Result::Ok(x) => x,
+        Result::Err(err) => {
+            eprintln!("Failed to load training examples to add: {}", err);
+            return;
+        }
+    };
+
+    let maybe_training_examples_to_add_to = TrainingExamples::load(&output_path);
+    let mut training_examples_to_add_to = match (maybe_training_examples_to_add_to) {
+        Result::Ok(x) => x,
+        Result::Err(err) => {
+            eprintln!("Failed to load training examples to add to: {}", err);
+            return;
+        }
+    };
+
+    training_examples_to_add_to.merge(training_examples_to_add);
+    let maybe_save_result = training_examples_to_add_to.save(&output_path); 
+    match (maybe_save_result) {
+        Result::Ok(_) => {
+            println!("Successfully added and saved training data");
+        },
+        Result::Err(err) => {
+            eprintln!("Failed to save combined training data: {}", err);
+        }
+    }
+}
+
 fn gen_synthetic_training_data_command(params : Params, training_data_output_path : &str) {
     let mut rng = rand::thread_rng();
     let mut builder = TrainingExamplesBuilder::new(&params);
@@ -290,7 +337,7 @@ fn gen_synthetic_training_data_command(params : Params, training_data_output_pat
     }
 }
 
-fn distill_training_data_command(params : Params, game_data_root : &str, training_data_output_path : &str) {
+fn distill_game_data_command(params : Params, game_data_root : &str, training_data_output_path : &str) {
     let game_data_root_path = Path::new(game_data_root);
     let maybe_dir_listing = fs::read_dir(&game_data_root_path);
 
