@@ -17,7 +17,7 @@ mod network_config;
 mod game_state;
 mod training_examples;
 
-use tch::{kind, Tensor, nn::Adam, nn::OptimizerConfig};
+use tch::{kind, Tensor, nn::Adam, nn::OptimizerConfig, Cuda};
 use std::fs;
 use std::env;
 use crate::game_state::*;
@@ -283,7 +283,7 @@ fn add_training_data_command(_params : Params, training_data_to_add_path : &str,
     let to_add_path = Path::new(training_data_to_add_path);
     let output_path = Path::new(training_data_output_path);
 
-    let maybe_training_examples_to_add = TrainingExamples::load(&to_add_path);
+    let maybe_training_examples_to_add = TrainingExamples::load(&to_add_path, tch::Device::Cpu);
     let training_examples_to_add = match (maybe_training_examples_to_add) {
         Result::Ok(x) => x,
         Result::Err(err) => {
@@ -292,7 +292,7 @@ fn add_training_data_command(_params : Params, training_data_to_add_path : &str,
         }
     };
 
-    let maybe_training_examples_to_add_to = TrainingExamples::load(&output_path);
+    let maybe_training_examples_to_add_to = TrainingExamples::load(&output_path, tch::Device::Cpu);
     let mut training_examples_to_add_to = match (maybe_training_examples_to_add_to) {
         Result::Ok(x) => x,
         Result::Err(err) => {
@@ -397,7 +397,11 @@ fn distill_game_data_command(params : Params, game_data_root : &str, training_da
 }
 
 fn train_command(params : Params, network_config_path : &str, training_data_path : &str) {
-    let mut vs = tch::nn::VarStore::new(tch::Device::Cpu);
+    let device = tch::Device::Cuda(params.gpu_slot);
+    println!("Is cuDNN available?: {}", Cuda::cudnn_is_available());
+    Cuda::set_user_enabled_cudnn(true);
+    Cuda::cudnn_set_benchmark(true);
+    let mut vs = tch::nn::VarStore::new(device);
     let network_config = NetworkConfig::new(&params, &vs.root());
 
     let network_path = Path::new(network_config_path);
@@ -415,7 +419,7 @@ fn train_command(params : Params, network_config_path : &str, training_data_path
 
     let mut rng = rand::thread_rng();
     let data_path = Path::new(training_data_path);
-    let maybe_training_examples = TrainingExamples::load(&data_path);
+    let maybe_training_examples = TrainingExamples::load(&data_path, tch::Device::Cpu);
     match (maybe_training_examples) {
         Result::Ok(training_examples) => { 
             println!("Successfully loaded training examples");
@@ -427,7 +431,7 @@ fn train_command(params : Params, network_config_path : &str, training_data_path
             let mut opt = adam.build(&vs, params.train_step_size).unwrap();
             for epoch in 0..params.train_epochs {
                 let train_loss = network_config.run_training_epoch(&params, &training_examples, 
-                                                                   &mut opt, &mut rng);
+                                                                   &mut opt, device, &mut rng);
                 println!("epoch: {} train loss: {}", epoch, train_loss);
 
                 //Write out the updated network weights

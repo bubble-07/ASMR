@@ -256,7 +256,9 @@ impl NetworkConfig {
     }
     pub fn run_training_epoch<R : Rng + ?Sized>(&self, params : &Params, 
                               training_examples : &TrainingExamples, 
-                              opt : &mut Optimizer, rng : &mut R) -> f64 {
+                              opt : &mut Optimizer,
+                              device : Device,
+                              rng : &mut R) -> f64 {
         let mut total_loss = 0f64;
 
         let set_sizings : Vec<usize> = training_examples.flattened_matrix_sets.keys().map(|x| *x).collect();
@@ -279,7 +281,6 @@ impl NetworkConfig {
         }
 
         let num_iters = maximal_sizing / params.batch_size;
-        let device = Device::Cpu;
 
         for _ in 0..num_iters {
             let mut iter_loss = Tensor::scalar_tensor(0f64, (Kind::Float, device));

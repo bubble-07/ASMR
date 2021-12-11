@@ -43,7 +43,9 @@ pub struct Params {
     ///Weight decay factor
     pub weight_decay_factor : f64,
     ///Batch size for training
-    pub batch_size : usize
+    pub batch_size : usize,
+    ///GPU slot to use for training
+    pub gpu_slot : usize
 }
 
 impl Params {

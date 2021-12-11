@@ -1,4 +1,4 @@
-use tch::{nn, no_grad_guard, nn::Init, nn::Module, Tensor, nn::Sequential};
+use tch::{nn, no_grad_guard, nn::Init, nn::Module, Tensor, nn::Sequential, Device};
 use crate::game_data::*;
 use std::collections::HashMap;
 use rand::Rng;
@@ -238,8 +238,8 @@ impl TrainingExamples {
             Result::Err(err) => Result::Err(format!("Could not save training examples: {}", err))
         }
     }
-    pub fn load<T : AsRef<Path>>(path : T) -> Result<TrainingExamples, String> {
-        let maybe_named_tensors = Tensor::load_multi(path);
+    pub fn load<T : AsRef<Path>>(path : T, device : Device) -> Result<TrainingExamples, String> {
+        let maybe_named_tensors = Tensor::load_multi_with_device(path, device);
         match (maybe_named_tensors) {
             Result::Ok(mut named_tensors) => {
                 let mut flattened_matrix_sets = HashMap::new();
