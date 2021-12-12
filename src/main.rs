@@ -36,9 +36,13 @@ ASMR run_game [game_config_path] [network_config_path] [game_data_output_path] [
     and runs a game, outputting finalized game-data (training data) to the given output path.
     If [dotfile_output_path]? is present, this will also output a .dot file visualization
     of the game-tree once the simulation has completed.
-ASMR gen_synthetic_training_data [game_config_path] [training_data_output_path]
+ASMR gen_synthetic_training_data_files [game_config_path] [training_data_output_dir]
     Using the given game configuration json, randomly-generates a bunch of synthetic
-    games, outputting the finalized training data to the given output path
+    games, outputting the results to a directory filled with finalized
+    training data files with sequential names data0.tensor, data1.tensor, ... etc.
+ASMR gen_synthetic_training_data_file [game_config_path] [training_data_output_path]
+    Using the given game configuration json, randomly-generates a bunch of synthetic
+    games, outputting the finalized training data file to the given output path
 ASMR add_training_data [game_config_path] [training_data_to_add_path] [training_data_output_path]
     Using the given game configuration json, concatenates the training data
     at the given path to the training data at the output path, overwriting the destination
@@ -81,14 +85,23 @@ fn main() {
                     let training_data_output_path = &args[4];
                     add_training_data_command(params, training_data_to_add_path, training_data_output_path);
                 },
-                "gen_synthetic_training_data" => {
+                "gen_synthetic_training_data_file" => {
                     if (args.len() < 4) {
                         eprintln!("error: not enough arguments");
                         print_help();
                         return;
                     }
                     let training_data_output_path = &args[3];
-                    gen_synthetic_training_data_command(params, training_data_output_path);
+                    gen_synthetic_training_data_file_command(&params, training_data_output_path);
+                },
+                "gen_synthetic_training_data_files" => {
+                    if (args.len() < 4) {
+                        eprintln!("error: not enough arguments");
+                        print_help();
+                        return;
+                    }
+                    let training_data_output_dir = &args[3];
+                    gen_synthetic_training_data_files_command(params, training_data_output_dir);
                 }
                 "distill_game_data" => {
                     if (args.len() < 5) {
@@ -313,9 +326,16 @@ fn add_training_data_command(_params : Params, training_data_to_add_path : &str,
     }
 }
 
-fn gen_synthetic_training_data_command(params : Params, training_data_output_path : &str) {
+fn gen_synthetic_training_data_files_command(params : Params, training_data_output_dir : &str) {
+    for i in 0..params.num_synthetic_training_data_files {
+        let filename = format!("{}/data{}.tensor", training_data_output_dir, i);
+        gen_synthetic_training_data_file_command(&params, &filename);
+    }
+}
+
+fn gen_synthetic_training_data_file_command(params : &Params, training_data_output_path : &str) {
     let mut rng = rand::thread_rng();
-    let mut builder = TrainingExamplesBuilder::new(&params);
+    let mut builder = TrainingExamplesBuilder::new(params);
 
     for _ in 0..params.num_synthetic_training_games {
         let game_path = params.generate_random_game_path(&mut rng);
@@ -429,10 +449,10 @@ fn train_command(params : Params, network_config_path : &str, training_data_path
                 ..Adam::default()
             };
             let mut opt = adam.build(&vs, params.train_step_size).unwrap();
-            for epoch in 0..params.train_epochs {
+            loop {
                 let train_loss = network_config.run_training_epoch(&params, &training_examples, 
                                                                    &mut opt, device, &mut rng);
-                println!("epoch: {} train loss: {}", epoch, train_loss);
+                println!("train loss for the save: {}", train_loss);
 
                 //Write out the updated network weights
                 let maybe_save_result = vs.save(&network_path);

@@ -34,12 +34,14 @@ pub struct Params {
     pub max_num_turns : usize,
     ///Number of monte-carlo-tree-search updates per game
     pub iters_per_game : usize,
-    ///Number of epochs for training
-    pub train_epochs : usize,
+    ///Number of batches before saving out the updated network configuration for training
+    pub train_batches_per_save : usize,
     ///Step-size for Adam optimizer
     pub train_step_size : f64,
-    ///Number of synthetic training games
+    ///Number of synthetic training games per synthetic training data file
     pub num_synthetic_training_games : usize,
+    ///Number of synthetic training data files to generate
+    pub num_synthetic_training_data_files : usize,
     ///Weight decay factor
     pub weight_decay_factor : f64,
     ///Batch size for training

@@ -262,25 +262,21 @@ impl NetworkConfig {
         let mut total_loss = 0f64;
 
         let set_sizings : Vec<usize> = training_examples.flattened_matrix_sets.keys().map(|x| *x).collect();
-        let mut num_samples_per_set = Vec::new();
 
         let mut loss_weightings : Vec<f32> = Vec::new();
         let mut total_n = 0;
         for set_sizing in set_sizings.iter() {
             let flattened_matrix_targets = training_examples.flattened_matrix_targets.get(set_sizing).unwrap();
             let n = flattened_matrix_targets.size()[0];
-            num_samples_per_set.push(n as usize);
             loss_weightings.push(n as f32);
             total_n += n;
         }
 
-        let maximal_sizing = num_samples_per_set.iter().max().unwrap();
-        
         for i in 0..set_sizings.len() {
             loss_weightings[i] /= total_n as f32;
         }
 
-        let num_iters = maximal_sizing / params.batch_size;
+        let num_iters = params.train_batches_per_save;
 
         for _ in 0..num_iters {
             let mut iter_loss = Tensor::scalar_tensor(0f64, (Kind::Float, device));
