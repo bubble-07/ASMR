@@ -243,19 +243,29 @@ impl GamePath {
         self.nodes.push(game_path_node);
     }
     
-    pub fn add_random_node<R : Rng + ?Sized>(&mut self, rng : &mut R) {
+    fn add_random_node<R : Rng + ?Sized>(&mut self, already_added_pairs : &mut HashSet<(usize, usize)>,
+                                             rng : &mut R) {
         let size = self.get_size();
-        let left_index = rng.gen_range(0..size);
-        let right_index = rng.gen_range(0..size);
+        let mut left_index = rng.gen_range(0..size);
+        let mut right_index = rng.gen_range(0..size);
+        let mut pair = (left_index, right_index);
+        while (already_added_pairs.contains(&pair)) {
+            left_index = rng.gen_range(0..size);
+            right_index = rng.gen_range(0..size);
+            pair = (left_index, right_index);
+        }
+        already_added_pairs.insert(pair);
         self.add_node(left_index, right_index);
     }
     
     pub fn generate_game_path<R : Rng + ?Sized>(matrix_set : MatrixSet, 
                                                 ground_truth_num_moves : usize,
                                                 rng : &mut R) -> GamePath {
+        let mut already_added_pairs = HashSet::new();
+
         let mut result = GamePath::new(matrix_set);
         for _ in 0..ground_truth_num_moves {
-            result.add_random_node(rng);
+            result.add_random_node(&mut already_added_pairs, rng);
         }
         result
     }
