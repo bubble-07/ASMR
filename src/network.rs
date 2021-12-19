@@ -21,6 +21,9 @@ pub fn injector_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs : T) -> Conca
                       vs / format!("layer_{}", i),
                       params.num_feat_maps));
     } 
+    //Ensures that the scale of the output is the same as the output
+    //scale of combiner net, roughly speaking
+    net = net.add_fn(|xs| xs.tanh());
     net
 }
 
@@ -41,6 +44,9 @@ pub fn combiner_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs : T) -> Conca
                       params.num_feat_maps,
                       Default::default()
                  ));
+    //Ensures that the scale of the output remains roughly the same
+    //from combiner to combiner
+    net = net.add_fn(|xs| xs.tanh());
     net
 }
 
@@ -71,5 +77,6 @@ pub fn half_policy_extraction_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs
                       feats,
                       Default::default()
                   ));
+    net = net.add_fn(|xs| xs.tanh());
     net
 }

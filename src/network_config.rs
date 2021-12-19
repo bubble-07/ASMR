@@ -183,16 +183,13 @@ impl NetworkConfig {
         //Combine the left and right policy vectors by doing pairwise dot-products
         //Each policy vec is NxF
         //NxKxF
-        let unnormalized_left_policy_mat = Tensor::stack(&left_policy_vecs, 1);
+        let left_policy_mat = Tensor::stack(&left_policy_vecs, 1);
         //NxFxK
-        let unnormalized_right_policy_mat = Tensor::stack(&right_policy_vecs, 2);
+        let right_policy_mat = Tensor::stack(&right_policy_vecs, 2);
         //NxKxK
         
-        let left_policy_mat = unnormalized_left_policy_mat.tanh();
-        let right_policy_mat = unnormalized_right_policy_mat.tanh();
-        
         let mut unnormalized_policy_mat = left_policy_mat.matmul(&right_policy_mat);
-        unnormalized_policy_mat *= &self.policy_confidence_scaling.celu();
+        unnormalized_policy_mat *= &(1.0 + self.policy_confidence_scaling.celu());
         unnormalized_policy_mat
     }
 

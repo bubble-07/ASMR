@@ -38,6 +38,12 @@ impl ConcatThenSequential {
             seq : sequential
         }
     }
+    pub fn add_fn<F>(self, f : F) -> Self 
+    where
+        F : 'static + Fn(&Tensor) -> Tensor + Send,
+    {
+        self.add(tch::nn::func(f))
+    }
 }
 
 pub fn concat_then_seq() -> ConcatThenSequential {

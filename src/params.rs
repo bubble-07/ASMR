@@ -1,9 +1,10 @@
 use crate::game_state::*;
 use crate::matrix_set::*;
 use rand::Rng;
-use rand_distr::{Uniform, Geometric, LogNormal, Distribution};
+use rand_distr::{Uniform, Geometric, LogNormal, Distribution, StandardNormal};
 use ndarray::*;
 use ndarray_rand::RandomExt;
+use ndarray_linalg::*;
 use ndarray::{Array, ArrayBase};
 use std::convert::TryInto;
 use serde::{Serialize, Deserialize};
@@ -55,20 +56,38 @@ impl Params {
         (self.matrix_dim * self.matrix_dim).try_into().unwrap()
     }
 
-    fn generate_matrix_set<R : Rng + ?Sized>(&self, set_size : usize, rng : &mut R) -> MatrixSet {
-        let log_normal = LogNormal::new(0.0, self.log_normal_std_dev).unwrap();
+    fn generate_random_orthogonal_matrix<R : Rng + ?Sized>(&self, rng : &mut R) -> Array2<f32> {
+        let standard_normal = StandardNormal;
+        
+        let normal_matrix = Array::random_using((self.matrix_dim, self.matrix_dim), standard_normal, rng);
 
+        let (maybe_u, _, _) = normal_matrix.svd(true, false).unwrap();
+        let u = maybe_u.unwrap();
+        u
+    }
+
+    fn generate_random_singular_value<R : Rng + ?Sized>(&self, rng : &mut R) -> f32 {
+        let log_normal = LogNormal::new(0.0, self.log_normal_std_dev).unwrap();
+        log_normal.sample(rng) as f32
+    }
+
+    fn generate_random_matrix<R : Rng + ?Sized>(&self, rng : &mut R) -> Array2<f32> {
+        let U = self.generate_random_orthogonal_matrix(rng);
+        let V = self.generate_random_orthogonal_matrix(rng);
+        let mut S = Array::zeros((self.matrix_dim, self.matrix_dim));
+        for i in 0..self.matrix_dim {
+            let singular_value = self.generate_random_singular_value(rng);
+            S[[i, i]] = singular_value;
+        }
+        let result = U.dot(&S).dot(&V);
+        result
+    }
+
+    fn generate_matrix_set<R : Rng + ?Sized>(&self, set_size : usize, rng : &mut R) -> MatrixSet {
         let mut matrices = Vec::new();
 
         for _ in 0..set_size {
-            let uniform_zero_one = Uniform::new_inclusive(0, 1);
-            let sign_distribution = uniform_zero_one.map(|num| (num as f64) * 2.0f64 - 1.0f64);
-
-            let unsigned_matrix = Array::random_using((self.matrix_dim, self.matrix_dim), log_normal, rng);
-            let sign_matrix = Array::random_using((self.matrix_dim, self.matrix_dim), sign_distribution, rng);
-            let wide_matrix = &sign_matrix * &unsigned_matrix;
-            let matrix = wide_matrix.mapv(|x| x as f32);
-
+            let matrix = self.generate_random_matrix(rng);
             matrices.push(matrix);
         }
 
