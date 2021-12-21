@@ -35,7 +35,8 @@ pub struct Params {
     pub max_num_turns : usize,
     ///Number of monte-carlo-tree-search updates per game
     pub iters_per_game : usize,
-    ///Number of batches before saving out the updated network configuration for training
+    ///Number of batches before evaluating validation loss
+    ///and potentially saving out the updated network configuration for training
     pub train_batches_per_save : usize,
     ///Step-size for Adam optimizer
     pub train_step_size : f64,
@@ -47,6 +48,8 @@ pub struct Params {
     pub weight_decay_factor : f64,
     ///Batch size for training
     pub batch_size : usize,
+    ///Number of batches to hold out of the training set for validation
+    pub held_out_validation_batches : usize,
     ///GPU slot to use for training
     pub gpu_slot : usize
 }

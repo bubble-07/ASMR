@@ -1,4 +1,5 @@
-use tch::{nn, no_grad_guard, nn::Init, nn::Module, Tensor, nn::Sequential, Device};
+use tch::{no_grad_guard, nn, nn::Init, nn::Module, Tensor, nn::Sequential, kind::Kind,
+          nn::Optimizer, IndexOp, Device};
 use crate::game_data::*;
 use std::collections::HashMap;
 use rand::Rng;
@@ -9,6 +10,7 @@ use std::convert::{TryFrom, TryInto};
 use std::path::Path;
 use crate::params::*;
 use crate::turn_data::*;
+use crate::network_config::*;
 
 pub struct TrainingExamples {
     ///Mapping from set size to a K-element list of tensors of dims NxM,
@@ -33,7 +35,106 @@ pub struct TrainingExamplesBuilder {
     pub m : usize
 }
 
+pub struct BatchIndex {
+    pub set_sizing : usize,
+    pub batch_index : usize
+}
+
+impl BatchIndex {
+    pub fn get_normalized_loss(&self, params : &Params, training_examples : &TrainingExamples,
+                               network_config : &NetworkConfig, 
+                               device : Device) -> Tensor {
+        let flattened_matrix_sets = training_examples.flattened_matrix_sets.get(&self.set_sizing).unwrap();
+        let flattened_matrix_targets = training_examples.flattened_matrix_targets.get(&self.set_sizing).unwrap();
+        let child_visit_probabilities = training_examples.child_visit_probabilities.get(&self.set_sizing).unwrap();
+
+        let n = flattened_matrix_targets.size()[0] as usize;
+
+        let start = (self.batch_index * params.batch_size) as i64;
+        let size = std::cmp::min(params.batch_size as i64, (n as i64) - start);
+
+
+        let matrix_sets_slices : Vec<Tensor> = flattened_matrix_sets.iter().map(|x|
+                                  x.i(start..start + size).to_device(device).detach())
+                                                             .collect();
+        let matrix_targets_slices = flattened_matrix_targets.i(start..start + size)
+                                    .to_device(device).detach();
+        let child_visit_probabilities_slices = child_visit_probabilities.i(start..start + size)
+                                    .to_device(device).detach();
+
+
+        
+        let normalized_loss = network_config.get_loss_from_scratch(&matrix_sets_slices, &matrix_targets_slices,
+                                         &child_visit_probabilities_slices);
+        normalized_loss
+    }
+}
+
 impl TrainingExamples {
+    pub fn get_validation_loss_weightings(&self, _params : &Params, set_sizings : &[usize]) -> Vec<f32> {
+        let mut total_n = 0;
+        let mut result = Vec::new();
+        for set_sizing in set_sizings.iter() {
+            let n = self.get_total_number_of_examples(*set_sizing);
+            result.push(n as f32);
+            total_n += n;
+        }
+        for i in 0..result.len() {
+            result[i] /= total_n as f32;
+        }
+        result
+    }
+    pub fn get_training_loss_weightings(&self, params : &Params, set_sizings : &[usize]) -> Vec<f32> {
+        let mut total_batches = 0;
+        let mut result = Vec::new();
+        for set_sizing in set_sizings.iter() {
+            let batches = self.get_total_number_of_training_batches(params, *set_sizing);
+            result.push(batches as f32);
+            total_batches += batches;
+        }
+        for i in 0..result.len() {
+            result[i] /= total_batches as f32;
+        }
+        result
+    }
+    pub fn get_set_sizings(&self) -> Vec<usize> {
+        let set_sizings : Vec<usize> = self.flattened_matrix_sets.keys().map(|x| *x).collect();
+        set_sizings
+    }
+    pub fn get_normalized_random_choice_loss(&self, set_sizing : usize) -> f64 {
+        let target_policy = self.child_visit_probabilities.get(&set_sizing).unwrap();
+        let k_squared = target_policy.size()[1];
+        
+        let nat_log = (k_squared as f64).ln();
+        nat_log
+    }
+    pub fn get_total_number_of_validation_batches(&self, params : &Params, set_sizing : usize) -> usize {
+        self.get_total_number_of_batches(params, set_sizing) - 
+            self.get_total_number_of_training_batches(params, set_sizing)
+    }
+    pub fn get_total_number_of_training_batches(&self, params : &Params, set_sizing : usize) -> usize {
+        let num_batches = self.get_total_number_of_batches(params, set_sizing);
+        if (num_batches <= params.held_out_validation_batches) {
+            0
+        } else {
+            num_batches - params.held_out_validation_batches
+        }
+    }
+    pub fn get_total_number_of_batches(&self, params : &Params, set_sizing : usize) -> usize {
+        let n = self.get_total_number_of_examples(set_sizing);
+        let total_full_batches = n / params.batch_size;
+        let has_partial_batch_at_end = n % params.batch_size != 0;
+        if (has_partial_batch_at_end) {
+            total_full_batches + 1
+        } else {
+            total_full_batches
+        }
+    }
+    pub fn get_total_number_of_examples(&self, set_sizing : usize) -> usize {
+        let n = self.flattened_matrix_targets.get(&set_sizing).unwrap().size()[0] as usize;
+        n
+    }
+
     fn concat_consume(a : Tensor, b : Tensor) -> Tensor {
         let result = Tensor::cat(&[a, b], 0);
         result

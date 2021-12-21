@@ -449,19 +449,24 @@ fn train_command(params : Params, network_config_path : &str, training_data_path
                 ..Adam::default()
             };
             let mut opt = adam.build(&vs, params.train_step_size).unwrap();
+            let mut best_validation_loss = f64::INFINITY;
             loop {
-                let train_loss = network_config.run_training_epoch(&params, &training_examples, 
+                let (train_loss, validation_loss) = network_config.run_training_epoch(&params, &training_examples, 
                                                                    &mut opt, device, &mut rng);
-                println!("train loss for the save: {}", train_loss);
+                println!("train loss for the epoch: {} validation loss: {}", train_loss, validation_loss);
 
-                //Write out the updated network weights
-                let maybe_save_result = vs.save(&network_path);
-                match (maybe_save_result) {
-                    Result::Ok(_) => {
-                        println!("Successfully wrote out the updated network configuration");
-                    },
-                    Result::Err(e) => {
-                        eprintln!("Failed to write out updated network configuration: {}", e);
+                if (validation_loss < best_validation_loss) {
+                    best_validation_loss = validation_loss;
+                    println!("Validation loss is a new record! Writing out updated network configuration...");
+                    //Write out the updated network weights
+                    let maybe_save_result = vs.save(&network_path);
+                    match (maybe_save_result) {
+                        Result::Ok(_) => {
+                            println!("Successfully wrote out the updated network configuration");
+                        },
+                        Result::Err(e) => {
+                            eprintln!("Failed to write out updated network configuration: {}", e);
+                        }
                     }
                 }
             }

@@ -251,73 +251,40 @@ impl NetworkConfig {
 
         -inner_product
     }
-    pub fn get_random_choice_loss(&self, target_policy : &Tensor) -> f64 {
-        let _guard = no_grad_guard();
-        let k_squared = target_policy.size()[1];
-
-        let nat_log = (k_squared as f64).ln();
-        nat_log
-    }
 
     pub fn run_training_epoch<R : Rng + ?Sized>(&self, params : &Params, 
                               training_examples : &TrainingExamples, 
                               opt : &mut Optimizer,
                               device : Device,
-                              rng : &mut R) -> f64 {
-        let mut total_loss = 0f64;
+                              rng : &mut R) -> (f64, f64) { //return value is training loss, validation loss
+        let mut total_train_loss = 0f64;
 
-        let set_sizings : Vec<usize> = training_examples.flattened_matrix_sets.keys().map(|x| *x).collect();
-
-        let mut loss_weightings : Vec<f32> = Vec::new();
-        let mut total_n = 0;
-        for set_sizing in set_sizings.iter() {
-            let flattened_matrix_targets = training_examples.flattened_matrix_targets.get(set_sizing).unwrap();
-            let n = flattened_matrix_targets.size()[0];
-            loss_weightings.push(n as f32);
-            total_n += n;
-        }
-
-        for i in 0..set_sizings.len() {
-            loss_weightings[i] /= total_n as f32;
-        }
+        let set_sizings = training_examples.get_set_sizings();
+        let validation_loss_weightings = training_examples.get_validation_loss_weightings(params, &set_sizings);
+        let training_loss_weightings = training_examples.get_training_loss_weightings(params, &set_sizings);
 
         let num_iters = params.train_batches_per_save;
 
+        //First train
         for _ in 0..num_iters {
             let mut iter_comparison = 0f64;
             let mut iter_loss = Tensor::scalar_tensor(0f64, (Kind::Float, device));
-            for (set_sizing, loss_weighting) in set_sizings.iter().zip(loss_weightings.iter()) {
-                let flattened_matrix_sets = training_examples.flattened_matrix_sets.get(set_sizing).unwrap();
-                let flattened_matrix_targets = training_examples.flattened_matrix_targets.get(set_sizing).unwrap();
-                let child_visit_probabilities = training_examples.child_visit_probabilities.get(set_sizing).unwrap();
-
-                let n = flattened_matrix_targets.size()[0] as usize;
-                let max_batch_index = n / params.batch_size;
-                let batch_index = if (max_batch_index == 0) {
-                    0
-                } else {
-                    rng.gen_range(0..max_batch_index)
+            for (set_sizing, loss_weighting) in set_sizings.iter().zip(training_loss_weightings.iter()) {
+                let total_training_batches = training_examples.get_total_number_of_training_batches(params, *set_sizing);
+                if (total_training_batches == 0) {
+                    continue; //Sux to sux
+                }
+                let batch_index = rng.gen_range(0..total_training_batches);
+                let batch_index = BatchIndex {
+                    set_sizing : *set_sizing,
+                    batch_index
                 };
-                let start = (batch_index * params.batch_size) as i64;
-                let size = std::cmp::min(params.batch_size as i64, n as i64);
 
-
-                let matrix_sets_slices : Vec<Tensor> = flattened_matrix_sets.iter().map(|x|
-                                          x.i(start..start + size).to_device(device).detach())
-                                                                     .collect();
-                let matrix_targets_slices = flattened_matrix_targets.i(start..start + size)
-                                            .to_device(device).detach();
-                let child_visit_probabilities_slices = child_visit_probabilities.i(start..start + size)
-                                            .to_device(device).detach();
-
-
-                
-                let mut normalized_loss = self.get_loss_from_scratch(&matrix_sets_slices, &matrix_targets_slices,
-                                                 &child_visit_probabilities_slices);
+                let mut normalized_loss = batch_index.get_normalized_loss(params, training_examples, &self, device);
                 normalized_loss *= *loss_weighting;
                 iter_loss += normalized_loss;
 
-                let mut normalized_loss_comparison = self.get_random_choice_loss(&child_visit_probabilities_slices);
+                let mut normalized_loss_comparison = training_examples.get_normalized_random_choice_loss(*set_sizing);
                 normalized_loss_comparison *= *loss_weighting as f64;
                 iter_comparison += normalized_loss_comparison;
             }
@@ -326,8 +293,29 @@ impl NetworkConfig {
             println!("Iter loss: {}, Random choice loss: {}", float_iter_loss, iter_comparison);
 
             opt.backward_step(&iter_loss);
-            total_loss += float_iter_loss / (num_iters as f64);
+            total_train_loss += float_iter_loss / (num_iters as f64);
         }
-        total_loss
+        //Now compute validation loss
+        let _guard = no_grad_guard();
+        let mut validation_loss = 0f64;
+        for relative_unwrapped_batch_index in 0..params.held_out_validation_batches {
+            for (set_sizing, loss_weighting) in set_sizings.iter().zip(validation_loss_weightings.iter()) {
+                let min_batch_index = training_examples.get_total_number_of_training_batches(params, *set_sizing);
+                let num_validation_batches = training_examples.get_total_number_of_validation_batches(params, *set_sizing);
+                let batch_index = min_batch_index + (relative_unwrapped_batch_index % num_validation_batches);
+                let batch_index = BatchIndex {
+                    set_sizing : *set_sizing,
+                    batch_index
+                };
+                
+                let mut normalized_loss = batch_index.get_normalized_loss(params, training_examples, &self, device);
+                normalized_loss *= *loss_weighting;
+                
+                validation_loss += f64::from(&normalized_loss);
+            }
+        }
+        validation_loss /= params.held_out_validation_batches as f64;
+
+        (total_train_loss, validation_loss)
     }
 }
