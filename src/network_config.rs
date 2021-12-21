@@ -251,6 +251,14 @@ impl NetworkConfig {
 
         -inner_product
     }
+    pub fn get_random_choice_loss(&self, target_policy : &Tensor) -> f64 {
+        let _guard = no_grad_guard();
+        let k_squared = target_policy.size()[1];
+
+        let nat_log = (k_squared as f64).ln();
+        nat_log
+    }
+
     pub fn run_training_epoch<R : Rng + ?Sized>(&self, params : &Params, 
                               training_examples : &TrainingExamples, 
                               opt : &mut Optimizer,
@@ -276,6 +284,7 @@ impl NetworkConfig {
         let num_iters = params.train_batches_per_save;
 
         for _ in 0..num_iters {
+            let mut iter_comparison = 0f64;
             let mut iter_loss = Tensor::scalar_tensor(0f64, (Kind::Float, device));
             for (set_sizing, loss_weighting) in set_sizings.iter().zip(loss_weightings.iter()) {
                 let flattened_matrix_sets = training_examples.flattened_matrix_sets.get(set_sizing).unwrap();
@@ -307,10 +316,14 @@ impl NetworkConfig {
                                                  &child_visit_probabilities_slices);
                 normalized_loss *= *loss_weighting;
                 iter_loss += normalized_loss;
+
+                let mut normalized_loss_comparison = self.get_random_choice_loss(&child_visit_probabilities_slices);
+                normalized_loss_comparison *= *loss_weighting as f64;
+                iter_comparison += normalized_loss_comparison;
             }
 
             let float_iter_loss = f64::from(&iter_loss);
-            println!("Iter loss: {}", float_iter_loss);
+            println!("Iter loss: {}, Random choice loss: {}", float_iter_loss, iter_comparison);
 
             opt.backward_step(&iter_loss);
             total_loss += float_iter_loss / (num_iters as f64);
