@@ -187,7 +187,7 @@ pub fn multi_head_self_attention<'a, T : Borrow<Path<'a>>>(network_path : T,
         let key_name = format!("key_former{}", i);
         let value_name = format!("value_former{}", i);
 
-        let dimensions = vec![full_dimension as i64, head_dimension as i64];
+        let dimensions = vec![head_dimension as i64, full_dimension as i64];
         let query_former = network_path.var(&query_name, &dimensions, Init::KaimingUniform);
         let key_former = network_path.var(&key_name, &dimensions, Init::KaimingUniform);
         let value_former = network_path.var(&value_name, &dimensions, Init::KaimingUniform);
