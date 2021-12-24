@@ -1,4 +1,5 @@
-use tch::{nn, nn::Init, nn::Module, Tensor, nn::Path, nn::Sequential};
+use tch::{nn, nn::Init, nn::Module, Tensor, nn::Path, nn::Sequential, nn::Linear, nn::LinearConfig,
+          nn::linear};
 use std::borrow::Borrow;
 use crate::params::*;
 use crate::neural_utils::*;
@@ -12,71 +13,36 @@ pub fn injector_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs : T) -> Conca
     let two_matrix_dim = 2 * params.get_flattened_matrix_dim();
     net = net.add(nn::linear(
                      vs / "init_linear",
-                     two_matrix_dim,
-                     params.num_feat_maps,
+                     two_matrix_dim as i64,
+                     params.num_feat_maps as i64,
                      Default::default()
                   ));
-    for i in 0..params.singleton_injection_layers {
+    for i in 0..params.num_injection_layers {
         net = net.add(linear_residual(
                       vs / format!("layer_{}", i),
                       params.num_feat_maps));
     } 
-    //Ensures that the scale of the output is the same as the output
-    //scale of combiner net, roughly speaking
+    net
+}
+
+///Module that takes num_feat_maps inputs and yields a descriptor of num_feat_maps
+///size which will be dot-producted with the corresponding ("left"/"right") policy
+///vector to yield a scalar policy value representing the 'goodness" of the combination
+pub fn half_policy_extraction_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs : T) -> Sequential {
+    let vs = vs.borrow();
+    let mut net = nn::seq();
+    net = net.add(linear(vs / "policy_extraction", params.num_feat_maps as i64, params.num_feat_maps as i64, 
+                  LinearConfig::default()));
+    //We need to bound the output here, or the gradients could potentially get too big.
+    //We compensate for this by applying a post-scaling to the policy logits, so no worries.
     net = net.add_fn(|xs| xs.tanh());
     net
 }
 
-///BiModule that takes two descriptors of NUM_FEAT_MAPS size
-///and yields a combined descriptor of NUM_FEAT_MAPS size
-pub fn combiner_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs : T) -> ConcatThenSequential {
-    let vs = vs.borrow();
-    let mut net = concat_then_seq();
-    let feats = params.num_feat_maps * 2;
-    for i in 0..params.combining_layers {
-        net = net.add(linear_residual(
-                      vs / format!("layer_{}", i),
-                      feats));
-    }
-    net = net.add(nn::linear(
-                      vs / format!("final_linear"),
-                      feats,
-                      params.num_feat_maps,
-                      Default::default()
-                 ));
-    //Ensures that the scale of the output remains roughly the same
-    //from combiner to combiner
-    net = net.add_fn(|xs| xs.tanh());
-    net
-}
-
-///BiModule that takes a descriptor of NUM_FEAT_MAPS size
-///representing the combined state of a collection of matrices
-///and a descriptor of NUM_FEAT_MAPS size representing the
-///descriptor for a single matrix, and yields a descriptor
-///of NUM_FEAT_MAPS * 2 size which will be dot-producted
-///with the corresponding ("left"/"right") policy vector to yield
-///a scalar policy value representing the "goodness" of the combination
-pub fn half_policy_extraction_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs : T) -> ConcatThenSequential {
-    let vs = vs.borrow();
-    let mut net = concat_then_seq();
-    let feats = params.num_feat_maps * 2;
-    for i in 0..params.policy_extraction_layers {
-        net = net.add(linear_residual(
-                      vs / format!("layer_{}", i),
-                      feats));
-    }
-    //We need this last linear layer because otherwise we could have
-    //less expressive dot-products due to the Leaky RELU in the last
-    //layer (albeit with a residual skip-connection, but relying
-    //on that would mean greater reliance on the behavior
-    //of earlier layers)
-    net = net.add(nn::linear(
-                      vs / format!("final_linear"),
-                      feats,
-                      feats,
-                      Default::default()
-                  ));
-    net = net.add_fn(|xs| xs.tanh());
-    net
+///KModule which takes num_feat_maps inputs provided by the injector_net above,
+///and yields outputs of num_feat_maps features by passing through a bunch o' residual
+///attention blocks
+pub fn main_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs : T) -> ResidualMultiHeadAttentionStack {
+    residual_multi_head_attention_stack(vs, params.num_blocks, params.num_layers_per_block,
+                                        params.num_feat_maps, params.num_attention_heads)
 }

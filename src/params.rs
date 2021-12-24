@@ -14,14 +14,16 @@ use crate::synthetic_data::*;
 pub struct Params {
     ///Dimension of the vector space the matrices operate on
     pub matrix_dim : usize,
-    ///Number of feature maps for both the singleton-injection and combining nets
-    pub num_feat_maps : i64,
-    ///Number of layers for the singleton injection net
-    pub singleton_injection_layers : usize,
-    ///Number of layers for the combining net
-    pub combining_layers : usize,
-    ///Number of layers for the policy extraction net
-    pub policy_extraction_layers : usize,
+    ///Number of feature maps used in all intermediate layers in the network
+    pub num_feat_maps : usize,
+    ///Number of neural net layers in between every multi-head attention layer
+    pub num_layers_per_block : usize,
+    ///Total number of neural net -> multi-head attention blocks in the network
+    pub num_blocks : usize,
+    ///Number of heads for the multi-head attention layers
+    pub num_attention_heads : usize,
+    ///Number of layers for injecting the (source matrix, target matrix) pairings into the network
+    pub num_injection_layers : usize,
     ///Standard deviation in log-space for generating random matrix entries
     pub log_normal_std_dev : f64,
     ///Minimum number of initial matrices to place in the randomly-generated set
