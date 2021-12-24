@@ -48,7 +48,8 @@ impl KModule for ResidualMultiHeadAttentionStack {
 pub struct ResidualMultiHeadAttentionBlock {
     pub multi_head_self_attention : MultiHeadSelfAttention,
     pub residual_block : MappedModule<ResidualBlock>,
-    pub post_multi_head_linear : nn::Linear
+    pub post_multi_head_linear : nn::Linear,
+    pub pre_multi_head_linear : nn::Linear
 }
 
 pub fn residual_multi_head_attention_block<'a, T : Borrow<Path<'a>>>(network_path : T, 
@@ -60,10 +61,13 @@ pub fn residual_multi_head_attention_block<'a, T : Borrow<Path<'a>>>(network_pat
     let mapped_residual_block = map_module(residual_block);
     let post_multi_head_linear = linear(network_path / "post_multi_head_linear", 
                                         full_dimension as i64, full_dimension as i64, LinearConfig::default());
+    let pre_multi_head_linear = linear(network_path / "pre_multi_head_linear", 
+                                        full_dimension as i64, full_dimension as i64, LinearConfig::default());
     ResidualMultiHeadAttentionBlock {
         multi_head_self_attention,
         residual_block : mapped_residual_block,
-        post_multi_head_linear
+        post_multi_head_linear,
+        pre_multi_head_linear
     }
 }
 
@@ -74,9 +78,12 @@ impl KModule for ResidualMultiHeadAttentionBlock {
 
         let mut results = Vec::new();
         for i in 0..after_attention.len() {
+            let after_residual_block = &after_residual_block[i];
+            let after_residual_block_scaled = self.pre_multi_head_linear.forward(after_residual_block);
+
             let after_attention = &after_attention[i];
             let after_scaling = self.post_multi_head_linear.forward(after_attention);
-            let result = &xs[i] + after_scaling;
+            let result = &xs[i] + after_scaling + after_residual_block_scaled;
             results.push(result);
         }
         results
