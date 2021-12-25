@@ -185,7 +185,9 @@ pub fn multi_head_self_attention<'a, T : Borrow<Path<'a>>>(network_path : T,
         let dimensions = vec![head_dimension as i64, full_dimension as i64];
         let query_former = network_path.var(&query_name, &dimensions, Init::KaimingUniform);
         let key_former = network_path.var(&key_name, &dimensions, Init::KaimingUniform);
-        let value_former = network_path.var(&value_name, &dimensions, Init::KaimingUniform);
+
+        //Inspired by normalization-free ResNets, we initialize these to zero
+        let value_former = network_path.var(&value_name, &dimensions, Init::Const(0.0));
 
         query_formers.push(query_former);
         key_formers.push(key_former);
@@ -304,9 +306,12 @@ pub fn linear_residual<'a, T : Borrow<Path<'a>>>(network_path : T,
     let bound = 1.0 / (dim as f64).sqrt();
 
     let first_bs = network_path.var("first_bias", &[dim as i64], Init::Uniform {lo : -bound, up : bound});
-    let second_bs = network_path.var("second_bias", &[dim as i64], Init::Uniform {lo : -bound, up : bound});
     let first_ws = network_path.var("first_weights", &[dim as i64, dim as i64], Init::KaimingUniform);
-    let second_ws = network_path.var("second_weights", &[dim as i64, dim as i64], Init::KaimingUniform);
+
+    //Inspired by normalizer-free ResNets, we initialize these to zero
+    let second_bs = network_path.var("second_bias", &[dim as i64], Init::Const(0.0));
+    let second_ws = network_path.var("second_weights", &[dim as i64, dim as i64], Init::Const(0.0));
+
     LinearResidual {
         first_ws,
         second_ws,
