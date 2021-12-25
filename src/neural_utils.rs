@@ -47,9 +47,7 @@ impl KModule for ResidualMultiHeadAttentionStack {
 #[derive(Debug)]
 pub struct ResidualMultiHeadAttentionBlock {
     pub multi_head_self_attention : MultiHeadSelfAttention,
-    pub residual_block : MappedModule<ResidualBlock>,
-    pub post_multi_head_linear : nn::Linear,
-    pub pre_multi_head_linear : nn::Linear
+    pub residual_block : MappedModule<ResidualBlock>
 }
 
 pub fn residual_multi_head_attention_block<'a, T : Borrow<Path<'a>>>(network_path : T, 
@@ -59,34 +57,24 @@ pub fn residual_multi_head_attention_block<'a, T : Borrow<Path<'a>>>(network_pat
     let multi_head_self_attention = multi_head_self_attention(network_path / "multi_head_self_attention", full_dimension, num_heads);
     let residual_block = residual_block(network_path / "residual_block", num_layers, full_dimension);
     let mapped_residual_block = map_module(residual_block);
-    let post_multi_head_linear = linear(network_path / "post_multi_head_linear", 
-                                        full_dimension as i64, full_dimension as i64, LinearConfig::default());
-    let pre_multi_head_linear = linear(network_path / "pre_multi_head_linear", 
-                                        full_dimension as i64, full_dimension as i64, LinearConfig::default());
+
     ResidualMultiHeadAttentionBlock {
         multi_head_self_attention,
-        residual_block : mapped_residual_block,
-        post_multi_head_linear,
-        pre_multi_head_linear
+        residual_block : mapped_residual_block
     }
 }
 
 impl KModule for ResidualMultiHeadAttentionBlock {
     fn forward(&self, xs : &[Tensor]) -> Vec<Tensor> {
-        let after_residual_block = self.residual_block.forward(xs);
-        let after_attention = self.multi_head_self_attention.forward(&after_residual_block);
-
-        let mut results = Vec::new();
+        let after_attention = self.multi_head_self_attention.forward(xs);
+        let mut residual_inputs = Vec::new();
         for i in 0..after_attention.len() {
-            let after_residual_block = &after_residual_block[i];
-            let after_residual_block_scaled = self.pre_multi_head_linear.forward(after_residual_block);
-
+            let x = &xs[i];
             let after_attention = &after_attention[i];
-            let after_scaling = self.post_multi_head_linear.forward(after_attention);
-            let result = &xs[i] + after_scaling + after_residual_block_scaled;
-            results.push(result);
+            let residual_input = x + after_attention;
+            residual_inputs.push(residual_input);
         }
-        results
+        self.residual_block.forward(&residual_inputs)
     }
 }
 
