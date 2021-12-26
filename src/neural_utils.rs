@@ -161,9 +161,10 @@ pub struct MultiHeadSelfAttention {
     pub head_dimension : usize,
     ///=1/sqrt(head_dimension)
     pub scaling_factor : f32,
-    ///Linear layers from full_dimension -> head_dimension -- there are num_heads of them
+    ///Linear layers from full_dimension -> full_dimension -- there are num_heads of them
     pub query_formers : Vec<Tensor>,
     pub key_formers : Vec<Tensor>,
+    ///Linear layer from full_dimension -> head_dimension -- there are num_heads of them
     pub value_formers : Vec<Tensor>
 }
 
@@ -182,12 +183,13 @@ pub fn multi_head_self_attention<'a, T : Borrow<Path<'a>>>(network_path : T,
         let key_name = format!("key_former{}", i);
         let value_name = format!("value_former{}", i);
 
-        let dimensions = vec![head_dimension as i64, full_dimension as i64];
+        let dimensions = vec![full_dimension as i64, full_dimension as i64];
         let query_former = network_path.var(&query_name, &dimensions, Init::KaimingUniform);
         let key_former = network_path.var(&key_name, &dimensions, Init::KaimingUniform);
 
         //Inspired by normalization-free ResNets, we initialize these to zero
-        let value_former = network_path.var(&value_name, &dimensions, Init::Const(0.0));
+        let value_former = network_path.var(&value_name, &[head_dimension as i64, full_dimension as i64], 
+                                            Init::Const(0.0));
 
         query_formers.push(query_former);
         key_formers.push(key_former);
