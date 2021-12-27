@@ -165,7 +165,9 @@ pub struct MultiHeadSelfAttention {
     pub query_formers : Vec<Tensor>,
     pub key_formers : Vec<Tensor>,
     ///Linear layer from full_dimension -> head_dimension -- there are num_heads of them
-    pub value_formers : Vec<Tensor>
+    pub value_formers : Vec<Tensor>,
+    ///Output weighting matrix
+    pub output_weighting : Tensor
 }
 
 pub fn multi_head_self_attention<'a, T : Borrow<Path<'a>>>(network_path : T, 
@@ -178,23 +180,26 @@ pub fn multi_head_self_attention<'a, T : Borrow<Path<'a>>>(network_path : T,
     let mut key_formers = Vec::new();
     let mut value_formers = Vec::new();
 
+    let dimensions = vec![full_dimension as i64, full_dimension as i64];
     for i in 0..num_heads {
         let query_name = format!("query_former{}", i);
         let key_name = format!("key_former{}", i);
         let value_name = format!("value_former{}", i);
 
-        let dimensions = vec![full_dimension as i64, full_dimension as i64];
         let query_former = network_path.var(&query_name, &dimensions, Init::KaimingUniform);
         let key_former = network_path.var(&key_name, &dimensions, Init::KaimingUniform);
 
-        //Inspired by normalization-free ResNets, we initialize these to zero
         let value_former = network_path.var(&value_name, &[head_dimension as i64, full_dimension as i64], 
-                                            Init::Const(0.0));
+                                            Init::KaimingUniform);
 
         query_formers.push(query_former);
         key_formers.push(key_former);
         value_formers.push(value_former);
     }
+
+    //Inspired by normalization-free ResNets, we initialize these to zero
+    let output_weighting = network_path.var("output_former", &dimensions, Init::Const(0.0));
+
     MultiHeadSelfAttention {
         num_heads,
         full_dimension,
@@ -202,7 +207,8 @@ pub fn multi_head_self_attention<'a, T : Borrow<Path<'a>>>(network_path : T,
         scaling_factor,
         query_formers,
         key_formers,
-        value_formers
+        value_formers,
+        output_weighting
     }
 }
 
@@ -256,7 +262,7 @@ impl KModule for MultiHeadSelfAttention {
         }
 
         //Dimensions N x K x full_dimension
-        let result_tensor = Tensor::concat(&head_results, 2);
+        let result_tensor = Tensor::concat(&head_results, 2).matmul(&self.output_weighting.tr());
         let result = result_tensor.unbind(1);
         result
     }
