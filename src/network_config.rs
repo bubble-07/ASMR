@@ -10,6 +10,7 @@ use ndarray::*;
 
 use rand::Rng;
 use rand::seq::SliceRandom;
+use core::iter::Sum;
 
 ///K: Number of matrices in the initial set
 ///N: number of training examples
@@ -19,11 +20,11 @@ pub struct NetworkConfig {
     ///Injection network, taking matrix, target pairs, and turning them into initial features -- M x M -> F
     injector_net : ConcatThenSequential,
     ///Main network - a stack of multi-head residual layers interspersed with RELU. F -> F
-    main_net : ResidualMultiHeadAttentionStack,
-    ///F -> F
-    left_policy_extraction_net : Sequential,
-    ///F -> F
-    right_policy_extraction_net : Sequential,
+    main_net : ResidualAttentionStackWithGlobalTrack,
+    ///F x F -> F, taking (single input, global input)
+    left_policy_extraction_net : ConcatThenSequential,
+    ///F x F -> F, taking (single input, global input)
+    right_policy_extraction_net : ConcatThenSequential,
     ///Single scalar to scale the unnormalized policy after the dot-products
     policy_confidence_scaling : Tensor
 }
@@ -141,16 +142,32 @@ impl NetworkConfig {
     }
 
     fn get_unnormalized_policy(&self, single_embeddings : &[Tensor]) -> Tensor {
-        let main_net_outputs = self.main_net.forward(single_embeddings); 
-
         let k = single_embeddings.len();
+
+        let mut averaged_embedding = Iterator::sum(single_embeddings.iter());
+        averaged_embedding *= (1.0f32 / (k as f32));
+
+        let mut main_net_inputs = Vec::new();
+        for single_embedding in single_embeddings {
+            main_net_inputs.push(single_embedding.shallow_clone());
+        }
+        main_net_inputs.push(averaged_embedding);
+
+        let main_net_inputs = main_net_inputs;
+
+        let mut main_net_outputs = self.main_net.forward(&main_net_inputs); 
+        let main_net_global_output = main_net_outputs.pop().unwrap();
+        let main_net_individual_outputs = main_net_outputs;
+
         //Compute left and right policy vectors
         let mut left_policy_vecs = Vec::new();
         let mut right_policy_vecs = Vec::new();
         for i in 0..k {
-            let main_net_output = &main_net_outputs[i];
-            let left_policy_vec = self.left_policy_extraction_net.forward(main_net_output);
-            let right_policy_vec = self.right_policy_extraction_net.forward(main_net_output);
+            let main_net_individual_output = &main_net_individual_outputs[i];
+            let left_policy_vec = self.left_policy_extraction_net
+                                  .forward(main_net_individual_output, &main_net_global_output);
+            let right_policy_vec = self.right_policy_extraction_net
+                                  .forward(main_net_individual_output, &main_net_global_output);
             left_policy_vecs.push(left_policy_vec);
             right_policy_vecs.push(right_policy_vec);
         }

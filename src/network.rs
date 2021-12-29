@@ -25,13 +25,20 @@ pub fn injector_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs : T) -> Conca
     net
 }
 
-///Module that takes num_feat_maps inputs and yields a descriptor of num_feat_maps
-///size which will be dot-producted with the corresponding ("left"/"right") policy
+///Module that takes two num_feat_maps-sized inputs, the first
+///for a single element's track and the second for the global track,
+///and yields a descriptor of num_feat_maps size which will be dot-producted with the corresponding ("left"/"right") policy
 ///vector to yield a scalar policy value representing the 'goodness" of the combination
-pub fn half_policy_extraction_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs : T) -> Sequential {
+pub fn half_policy_extraction_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs : T) -> ConcatThenSequential {
     let vs = vs.borrow();
-    let mut net = nn::seq();
-    net = net.add(linear(vs / "policy_extraction", params.num_feat_maps as i64, params.num_feat_maps as i64, 
+    let mut net = concat_then_seq();
+    let two_feat_dim = 2 * params.num_feat_maps;
+    for i in 0..params.num_policy_extraction_layers {
+        net = net.add(linear_residual(
+                      vs / format!("layer_{}", i),
+                      two_feat_dim));
+    }
+    net = net.add(linear(vs / "final_linear", two_feat_dim as i64, params.num_feat_maps as i64, 
                   LinearConfig::default()));
     //We need to bound the output here, or the gradients could potentially get too big.
     //We compensate for this by applying a post-scaling to the policy logits, so no worries.
@@ -42,7 +49,7 @@ pub fn half_policy_extraction_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs
 ///KModule which takes num_feat_maps inputs provided by the injector_net above,
 ///and yields outputs of num_feat_maps features by passing through a bunch o' residual
 ///attention blocks
-pub fn main_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs : T) -> ResidualMultiHeadAttentionStack {
-    residual_multi_head_attention_stack(vs, params.num_blocks, params.num_layers_per_block,
+pub fn main_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs : T) -> ResidualAttentionStackWithGlobalTrack {
+    residual_attention_stack_with_global_track(vs, params.num_blocks, params.num_layers_per_block,
                                         params.num_feat_maps, params.num_attention_heads)
 }

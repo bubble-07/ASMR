@@ -8,29 +8,29 @@ pub trait KModule : std::fmt::Debug + Send {
 }
 
 #[derive(Debug)]
-pub struct ResidualMultiHeadAttentionStack {
-    pub blocks : Vec<ResidualMultiHeadAttentionBlock>
+pub struct ResidualAttentionStackWithGlobalTrack {
+    pub blocks : Vec<ResidualAttentionBlockWithGlobalTrack>
 }
 
-pub fn residual_multi_head_attention_stack<'a, T : Borrow<Path<'a>>>(network_path : T,
+pub fn residual_attention_stack_with_global_track<'a, T : Borrow<Path<'a>>>(network_path : T,
     num_blocks : usize, num_layers_per_block : usize, full_dimension : usize, num_heads : usize)
-    -> ResidualMultiHeadAttentionStack {
+    -> ResidualAttentionStackWithGlobalTrack {
     
     let network_path = network_path.borrow();
 
     let mut blocks = Vec::new();
     for i in 0..num_blocks {
         let block_path = network_path / format!("block{}", i);
-        let block = residual_multi_head_attention_block(block_path, num_layers_per_block, 
+        let block = residual_attention_block_with_global_track(block_path, num_layers_per_block, 
                                                         full_dimension, num_heads);
         blocks.push(block);
     }
-    ResidualMultiHeadAttentionStack {
+    ResidualAttentionStackWithGlobalTrack {
         blocks
     }
 }
 
-impl KModule for ResidualMultiHeadAttentionStack {
+impl KModule for ResidualAttentionStackWithGlobalTrack {
     fn forward(&self, xs : &[Tensor]) -> Vec<Tensor> {
         let mut result = Vec::new();
         for x in xs.iter() {
@@ -44,27 +44,34 @@ impl KModule for ResidualMultiHeadAttentionStack {
     }
 }
 
+///A multi-head self-attention module on (K+1) inputs (the last of which is taken to be
+///the "global" input), followed by a uniform mapping of a ResidualBlock on the first K
+///inputs and a separate ResidualBlock on the "global" input. 
 #[derive(Debug)]
-pub struct ResidualMultiHeadAttentionBlock {
+pub struct ResidualAttentionBlockWithGlobalTrack {
     pub multi_head_self_attention : MultiHeadSelfAttention,
-    pub residual_block : MappedModule<ResidualBlock>
+    pub mapped_residual_block : MappedModule<ResidualBlock>,
+    pub global_residual_block : ResidualBlock
 }
 
-pub fn residual_multi_head_attention_block<'a, T : Borrow<Path<'a>>>(network_path : T, 
+
+pub fn residual_attention_block_with_global_track<'a, T : Borrow<Path<'a>>>(network_path : T, 
                       num_layers : usize, full_dimension : usize, num_heads : usize) ->
-                                                                    ResidualMultiHeadAttentionBlock {
+                                                                    ResidualAttentionBlockWithGlobalTrack {
     let network_path = network_path.borrow();
     let multi_head_self_attention = multi_head_self_attention(network_path / "multi_head_self_attention", full_dimension, num_heads);
-    let residual_block = residual_block(network_path / "residual_block", num_layers, full_dimension);
-    let mapped_residual_block = map_module(residual_block);
+    let mapped_residual_block = residual_block(network_path / "mapped_residual_block", num_layers, full_dimension);
+    let mapped_residual_block = map_module(mapped_residual_block);
+    let global_residual_block = residual_block(network_path / "global_residual_block", num_layers, full_dimension);
 
-    ResidualMultiHeadAttentionBlock {
+    ResidualAttentionBlockWithGlobalTrack {
         multi_head_self_attention,
-        residual_block : mapped_residual_block
+        mapped_residual_block,
+        global_residual_block
     }
 }
 
-impl KModule for ResidualMultiHeadAttentionBlock {
+impl KModule for ResidualAttentionBlockWithGlobalTrack {
     fn forward(&self, xs : &[Tensor]) -> Vec<Tensor> {
         let after_attention = self.multi_head_self_attention.forward(xs);
         let mut residual_inputs = Vec::new();
@@ -74,7 +81,12 @@ impl KModule for ResidualMultiHeadAttentionBlock {
             let residual_input = x + after_attention;
             residual_inputs.push(residual_input);
         }
-        self.residual_block.forward(&residual_inputs)
+        let global_residual_input = residual_inputs.pop().unwrap();
+        let global_residual_result = self.global_residual_block.forward(&global_residual_input);
+
+        let mut result = self.mapped_residual_block.forward(&residual_inputs);
+        result.push(global_residual_result);
+        result
     }
 }
 

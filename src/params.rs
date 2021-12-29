@@ -24,6 +24,8 @@ pub struct Params {
     pub num_attention_heads : usize,
     ///Number of layers for injecting the (source matrix, target matrix) pairings into the network
     pub num_injection_layers : usize,
+    ///Number of layers for extracting the policy from (single, global) pairings
+    pub num_policy_extraction_layers : usize,
     ///Standard deviation in log-space for generating random matrix entries
     pub log_normal_std_dev : f64,
     ///Minimum number of initial matrices to place in the randomly-generated set
