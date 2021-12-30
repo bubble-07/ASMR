@@ -13,7 +13,7 @@ pub struct ResidualAttentionStackWithGlobalTrack {
 }
 
 pub fn residual_attention_stack_with_global_track<'a, T : Borrow<Path<'a>>>(network_path : T,
-    num_blocks : usize, num_layers_per_block : usize, full_dimension : usize, num_heads : usize)
+    num_blocks : usize, num_layers_per_block : usize, full_dimension : usize)
     -> ResidualAttentionStackWithGlobalTrack {
     
     let network_path = network_path.borrow();
@@ -22,7 +22,7 @@ pub fn residual_attention_stack_with_global_track<'a, T : Borrow<Path<'a>>>(netw
     for i in 0..num_blocks {
         let block_path = network_path / format!("block{}", i);
         let block = residual_attention_block_with_global_track(block_path, num_layers_per_block, 
-                                                        full_dimension, num_heads);
+                                                        full_dimension);
         blocks.push(block);
     }
     ResidualAttentionStackWithGlobalTrack {
@@ -44,28 +44,28 @@ impl KModule for ResidualAttentionStackWithGlobalTrack {
     }
 }
 
-///A multi-head self-attention module on (K+1) inputs (the last of which is taken to be
+///A bilinear self-attention module on (K+1) inputs (the last of which is taken to be
 ///the "global" input), followed by a uniform mapping of a ResidualBlock on the first K
 ///inputs and a separate ResidualBlock on the "global" input. 
 #[derive(Debug)]
 pub struct ResidualAttentionBlockWithGlobalTrack {
-    pub multi_head_self_attention : MultiHeadSelfAttention,
+    pub bilinear_self_attention : BilinearSelfAttention,
     pub mapped_residual_block : MappedModule<ResidualBlock>,
     pub global_residual_block : ResidualBlock
 }
 
 
 pub fn residual_attention_block_with_global_track<'a, T : Borrow<Path<'a>>>(network_path : T, 
-                      num_layers : usize, full_dimension : usize, num_heads : usize) ->
+                      num_layers : usize, full_dimension : usize) ->
                                                                     ResidualAttentionBlockWithGlobalTrack {
     let network_path = network_path.borrow();
-    let multi_head_self_attention = multi_head_self_attention(network_path / "multi_head_self_attention", full_dimension, num_heads);
+    let bilinear_self_attention = bilinear_self_attention(network_path / "bilinear_self_attention", full_dimension);
     let mapped_residual_block = residual_block(network_path / "mapped_residual_block", num_layers, full_dimension);
     let mapped_residual_block = map_module(mapped_residual_block);
     let global_residual_block = residual_block(network_path / "global_residual_block", num_layers, full_dimension);
 
     ResidualAttentionBlockWithGlobalTrack {
-        multi_head_self_attention,
+        bilinear_self_attention,
         mapped_residual_block,
         global_residual_block
     }
@@ -73,7 +73,7 @@ pub fn residual_attention_block_with_global_track<'a, T : Borrow<Path<'a>>>(netw
 
 impl KModule for ResidualAttentionBlockWithGlobalTrack {
     fn forward(&self, xs : &[Tensor]) -> Vec<Tensor> {
-        let after_attention = self.multi_head_self_attention.forward(xs);
+        let after_attention = self.bilinear_self_attention.forward(xs);
         let mut residual_inputs = Vec::new();
         for i in 0..after_attention.len() {
             let x = &xs[i];
@@ -166,117 +166,62 @@ impl <M : Module> KModule for MappedModule<M> {
 }
 
 #[derive(Debug)]
-pub struct MultiHeadSelfAttention {
-    pub num_heads : usize,
+pub struct BilinearSelfAttention {
     pub full_dimension : usize,
-    ///head_dimension * num_heads = full_dimension
-    pub head_dimension : usize,
-    ///=1/sqrt(head_dimension)
+    ///=1/sqrt(full_dimension)
     pub scaling_factor : f32,
-    ///Linear layers from full_dimension -> full_dimension -- there are num_heads of them
-    pub query_formers : Vec<Tensor>,
-    pub key_formers : Vec<Tensor>,
-    ///Linear layer from full_dimension -> head_dimension -- there are num_heads of them
-    pub value_formers : Vec<Tensor>,
-    ///Output weighting matrix
-    pub output_weighting : Tensor
+    ///Interaction matrix (Q^T K) of dimensions full_dimension x full_dimension
+    pub interaction_matrix : Tensor,
+    ///Linear layer from full_dimension -> full_dimension whose effect will be modulated by the
+    ///interaction matrix
+    pub value_extractor : nn::Linear
 }
 
-pub fn multi_head_self_attention<'a, T : Borrow<Path<'a>>>(network_path : T, 
-                      full_dimension : usize, num_heads : usize) -> MultiHeadSelfAttention {
+pub fn bilinear_self_attention<'a, T : Borrow<Path<'a>>>(network_path : T, 
+                      full_dimension : usize) -> BilinearSelfAttention {
     let network_path = network_path.borrow();
-    let head_dimension = full_dimension / num_heads;
-    let scaling_factor = 1.0f32 / (head_dimension as f32).sqrt();
-
-    let mut query_formers = Vec::new();
-    let mut key_formers = Vec::new();
-    let mut value_formers = Vec::new();
-
+    let scaling_factor = 1.0f32 / (full_dimension as f32).sqrt();
     let dimensions = vec![full_dimension as i64, full_dimension as i64];
-    for i in 0..num_heads {
-        let query_name = format!("query_former{}", i);
-        let key_name = format!("key_former{}", i);
-        let value_name = format!("value_former{}", i);
 
-        let query_former = network_path.var(&query_name, &dimensions, Init::KaimingUniform);
-        let key_former = network_path.var(&key_name, &dimensions, Init::KaimingUniform);
+    let interaction_matrix = network_path.var("interaction_matrix", &dimensions, Init::KaimingUniform);
 
-        let value_former = network_path.var(&value_name, &[head_dimension as i64, full_dimension as i64], 
-                                            Init::KaimingUniform);
+    //Our motivation for using this initialization is to zero out the residual branch output
+    //in the larger network, to match the behavior of Normalizer-Free ResNets
+    let value_extractor_config = LinearConfig {
+        ws_init : Init::Const(0.0),
+        bs_init : Option::Some(Init::Const(0.0)),
+        bias : true
+    };
 
-        query_formers.push(query_former);
-        key_formers.push(key_former);
-        value_formers.push(value_former);
-    }
+    let value_extractor = nn::linear(network_path / "value_layer", full_dimension as i64,
+                                     full_dimension as i64, value_extractor_config);
 
-    //Inspired by normalization-free ResNets, we initialize these to zero
-    let output_weighting = network_path.var("output_former", &dimensions, Init::Const(0.0));
-
-    MultiHeadSelfAttention {
-        num_heads,
+    BilinearSelfAttention {
         full_dimension,
-        head_dimension,
         scaling_factor,
-        query_formers,
-        key_formers,
-        value_formers,
-        output_weighting
+        interaction_matrix,
+        value_extractor
     }
 }
 
-impl MultiHeadSelfAttention {
-    ///Takes in K tensors of N examples each, full_dimension features [that is, K (N x full_dimension) tensors]
-    ///and num_heads tensors for linear maps of full_dimension -> head_dimension,
-    ///and returns num_heads tensors of dimensions N x K x head_dimension
-    fn build_attention_input(&self, xs : &[Tensor], formers : &[Tensor]) -> Vec<Tensor> {
-        let k = xs.len();
-        
-        let mut results = Vec::new();
-        for i in 0..self.num_heads {
-            let mut head_result_vec = Vec::new();
-            for j in 0..k {
-                let x = &xs[j];
-                let former = &formers[i];
-                let y = x.matmul(&former.tr());
-                head_result_vec.push(y);
-            }
-            let head_result = Tensor::stack(&head_result_vec, 1); 
-            results.push(head_result);
-        }
-        results
-    }
-}
-
-impl KModule for MultiHeadSelfAttention {
+impl KModule for BilinearSelfAttention {
     fn forward(&self, xs : &[Tensor]) -> Vec<Tensor> {
-        let queries = self.build_attention_input(xs, &self.query_formers);
-        let keys = self.build_attention_input(xs, &self.key_formers);
-        let values = self.build_attention_input(xs, &self.value_formers);
+        //N x K x F
+        let xs_forward = Tensor::stack(xs, 1);
+        //N x F x K
+        let xs_reverse = Tensor::stack(xs, 2);
+        //N x K x K
+        let pre_softmax_weights = xs_forward.matmul(&self.interaction_matrix).matmul(&xs_reverse);
+        let softmax_weights = pre_softmax_weights.softmax(2, Kind::Float);
 
-        let mut head_results = Vec::new();
-        for i in 0..self.num_heads {
-            //Each of dimensions N x K x head_dimension
-            let query = &queries[i];
-            let key = &keys[i];
-            let value = &values[i];
+        //N x K x F
+        let values = self.value_extractor.forward(&xs_forward);
+        
+        //N x K x F
+        let output_tensor = softmax_weights.matmul(&values);
 
-            let scaled_query = self.scaling_factor * query;
-            let transposed_key = key.transpose(1, 2);
-
-            //Dimensions are N x K x K
-            let pre_softmax_weights = scaled_query.matmul(&transposed_key);
-            let softmax_weights = pre_softmax_weights.softmax(2, Kind::Float);
-
-            //Dimensions are N x K x head_dimension
-            let head_result = softmax_weights.matmul(value);
-
-            head_results.push(head_result);
-        }
-
-        //Dimensions N x K x full_dimension
-        let result_tensor = Tensor::concat(&head_results, 2).matmul(&self.output_weighting.tr());
-        let result = result_tensor.unbind(1);
-        result
+        let outputs = output_tensor.unbind(1);
+        outputs
     }
 }
 

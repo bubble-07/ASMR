@@ -20,8 +20,6 @@ pub struct Params {
     pub num_layers_per_block : usize,
     ///Total number of neural net -> multi-head attention blocks in the network
     pub num_blocks : usize,
-    ///Number of heads for the multi-head attention layers
-    pub num_attention_heads : usize,
     ///Number of layers for injecting the (source matrix, target matrix) pairings into the network
     pub num_injection_layers : usize,
     ///Number of layers for extracting the policy from (single, global) pairings

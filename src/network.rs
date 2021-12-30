@@ -51,5 +51,5 @@ pub fn half_policy_extraction_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs
 ///attention blocks
 pub fn main_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs : T) -> ResidualAttentionStackWithGlobalTrack {
     residual_attention_stack_with_global_track(vs, params.num_blocks, params.num_layers_per_block,
-                                        params.num_feat_maps, params.num_attention_heads)
+                                        params.num_feat_maps)
 }
