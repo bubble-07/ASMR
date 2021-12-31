@@ -16,10 +16,8 @@ pub struct Params {
     pub matrix_dim : usize,
     ///Number of feature maps used in all intermediate layers in the network
     pub num_feat_maps : usize,
-    ///Number of neural net layers in between every multi-head attention layer
-    pub num_layers_per_block : usize,
-    ///Total number of neural net -> multi-head attention blocks in the network
-    pub num_blocks : usize,
+    ///Number of layers for the main net with attention layers
+    pub num_main_net_layers : usize,
     ///Number of layers for injecting the (source matrix, target matrix) pairings into the network
     pub num_injection_layers : usize,
     ///Number of layers for extracting the policy from (single, global) pairings

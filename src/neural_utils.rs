@@ -9,24 +9,23 @@ pub trait KModule : std::fmt::Debug + Send {
 
 #[derive(Debug)]
 pub struct ResidualAttentionStackWithGlobalTrack {
-    pub blocks : Vec<ResidualAttentionBlockWithGlobalTrack>
+    pub layers : Vec<ResidualAttentionLayerWithGlobalTrack>
 }
 
 pub fn residual_attention_stack_with_global_track<'a, T : Borrow<Path<'a>>>(network_path : T,
-    num_blocks : usize, num_layers_per_block : usize, full_dimension : usize)
+    num_layers : usize, full_dimension : usize)
     -> ResidualAttentionStackWithGlobalTrack {
     
     let network_path = network_path.borrow();
 
-    let mut blocks = Vec::new();
-    for i in 0..num_blocks {
-        let block_path = network_path / format!("block{}", i);
-        let block = residual_attention_block_with_global_track(block_path, num_layers_per_block, 
-                                                        full_dimension);
-        blocks.push(block);
+    let mut layers = Vec::new();
+    for i in 0..num_layers {
+        let layer_path = network_path / format!("layer{}", i);
+        let layer = residual_attention_layer_with_global_track(layer_path, full_dimension);
+        layers.push(layer);
     }
     ResidualAttentionStackWithGlobalTrack {
-        blocks
+        layers
     }
 }
 
@@ -37,8 +36,8 @@ impl KModule for ResidualAttentionStackWithGlobalTrack {
             let x_clone = x.shallow_clone();
             result.push(x_clone)
         }
-        for block in self.blocks.iter() {
-            result = block.forward(&result);
+        for layer in self.layers.iter() {
+            result = layer.forward(&result);
         }
         result
     }
@@ -47,46 +46,81 @@ impl KModule for ResidualAttentionStackWithGlobalTrack {
 ///A bilinear self-attention module on (K+1) inputs (the last of which is taken to be
 ///the "global" input), followed by a uniform mapping of a ResidualBlock on the first K
 ///inputs and a separate ResidualBlock on the "global" input. 
+///
+///A residually-mapped function which consists of the sum of bilinear_self_attention + linear_transform +
+///bias mapped into a a leaky relu nonlinearity, followed by an arbitrary linear transformation of
+///the output (initialized to zero out the output), added back onto the residual branch.
+///The attention components are taken to be uniform across all (K+1) inputs (the last of which
+///is taken to be the "global" input), but linear and bias component parameters are split between
+///the uniform K elements and the extra "global" element.
 #[derive(Debug)]
-pub struct ResidualAttentionBlockWithGlobalTrack {
+pub struct ResidualAttentionLayerWithGlobalTrack {
     pub bilinear_self_attention : BilinearSelfAttention,
-    pub mapped_residual_block : MappedModule<ResidualBlock>,
-    pub global_residual_block : ResidualBlock
+    pub pre_linear_general : nn::Linear,
+    pub pre_linear_global : nn::Linear,
+    pub post_linear_general : nn::Linear,
+    pub post_linear_global : nn::Linear
 }
 
 
-pub fn residual_attention_block_with_global_track<'a, T : Borrow<Path<'a>>>(network_path : T, 
-                      num_layers : usize, full_dimension : usize) ->
-                                                                    ResidualAttentionBlockWithGlobalTrack {
-    let network_path = network_path.borrow();
-    let bilinear_self_attention = bilinear_self_attention(network_path / "bilinear_self_attention", full_dimension);
-    let mapped_residual_block = residual_block(network_path / "mapped_residual_block", num_layers, full_dimension);
-    let mapped_residual_block = map_module(mapped_residual_block);
-    let global_residual_block = residual_block(network_path / "global_residual_block", num_layers, full_dimension);
+impl KModule for ResidualAttentionLayerWithGlobalTrack {
+    fn forward(&self, xs : &[Tensor]) -> Vec<Tensor> {
+        let mut general_inputs = Vec::new();
+        for i in 0..(xs.len() - 1) {
+            general_inputs.push(xs[i].shallow_clone());
+        }
+        let global_input = xs[xs.len() - 1].shallow_clone();
 
-    ResidualAttentionBlockWithGlobalTrack {
-        bilinear_self_attention,
-        mapped_residual_block,
-        global_residual_block
+        let mut after_attention_general = self.bilinear_self_attention.forward(xs);
+        let after_attention_global = after_attention_general.pop().unwrap();
+
+        let mut result = Vec::new();
+        for (general_input, after_attention_general) in general_inputs.iter()
+                                                                      .zip(after_attention_general.iter()) {
+            let after_linear = self.pre_linear_general.forward(general_input);
+            let sum = &after_linear + after_attention_general;
+            let post_activation = sum.leaky_relu();
+            let output_general = self.post_linear_general.forward(&post_activation) + general_input;
+            result.push(output_general);
+        }
+
+        let sum_global = &after_attention_global + &self.pre_linear_global.forward(&global_input);
+        let post_activation_global = sum_global.leaky_relu();
+        let output_global = self.post_linear_global.forward(&post_activation_global) + &global_input;
+        result.push(output_global);
+
+        result
     }
 }
 
-impl KModule for ResidualAttentionBlockWithGlobalTrack {
-    fn forward(&self, xs : &[Tensor]) -> Vec<Tensor> {
-        let after_attention = self.bilinear_self_attention.forward(xs);
-        let mut residual_inputs = Vec::new();
-        for i in 0..after_attention.len() {
-            let x = &xs[i];
-            let after_attention = &after_attention[i];
-            let residual_input = x + after_attention;
-            residual_inputs.push(residual_input);
-        }
-        let global_residual_input = residual_inputs.pop().unwrap();
-        let global_residual_result = self.global_residual_block.forward(&global_residual_input);
+pub fn residual_attention_layer_with_global_track<'a, T : Borrow<Path<'a>>>(network_path : T, 
+                    full_dimension : usize) -> ResidualAttentionLayerWithGlobalTrack {
+    let network_path = network_path.borrow();
+    let bilinear_self_attention = bilinear_self_attention(network_path / "bilinear_self_attention", full_dimension);
 
-        let mut result = self.mapped_residual_block.forward(&residual_inputs);
-        result.push(global_residual_result);
-        result
+    let pre_linear_general = nn::linear(network_path / "pre_linear_general", 
+                                        full_dimension as i64, full_dimension as i64, Default::default());
+    let pre_linear_global = nn::linear(network_path / "pre_linear_global",
+                                        full_dimension as i64, full_dimension as i64, Default::default());
+
+    //These are initialized to zero in the style of normalization-free ResNets
+    let post_linear_config = LinearConfig {
+        ws_init : Init::Const(0.0),
+        bs_init : Option::Some(Init::Const(0.0)),
+        bias : true
+    };
+
+    let post_linear_general = nn::linear(network_path / "post_linear_general",
+                                         full_dimension as i64, full_dimension as i64, post_linear_config);
+    let post_linear_global = nn::linear(network_path / "post_linear_global",
+                                         full_dimension as i64, full_dimension as i64, post_linear_config);
+
+    ResidualAttentionLayerWithGlobalTrack {
+        bilinear_self_attention,
+        pre_linear_general,
+        pre_linear_global,
+        post_linear_general,
+        post_linear_global
     }
 }
 
@@ -172,9 +206,9 @@ pub struct BilinearSelfAttention {
     pub scaling_factor : f32,
     ///Interaction matrix (Q^T K) of dimensions full_dimension x full_dimension
     pub interaction_matrix : Tensor,
-    ///Linear layer from full_dimension -> full_dimension whose effect will be modulated by the
+    ///Linear transform from full_dimension -> full_dimension whose effect will be modulated by the
     ///interaction matrix
-    pub value_extractor : nn::Linear
+    pub value_extractor : Tensor
 }
 
 pub fn bilinear_self_attention<'a, T : Borrow<Path<'a>>>(network_path : T, 
@@ -184,17 +218,7 @@ pub fn bilinear_self_attention<'a, T : Borrow<Path<'a>>>(network_path : T,
     let dimensions = vec![full_dimension as i64, full_dimension as i64];
 
     let interaction_matrix = network_path.var("interaction_matrix", &dimensions, Init::KaimingUniform);
-
-    //Our motivation for using this initialization is to zero out the residual branch output
-    //in the larger network, to match the behavior of Normalizer-Free ResNets
-    let value_extractor_config = LinearConfig {
-        ws_init : Init::Const(0.0),
-        bs_init : Option::Some(Init::Const(0.0)),
-        bias : true
-    };
-
-    let value_extractor = nn::linear(network_path / "value_layer", full_dimension as i64,
-                                     full_dimension as i64, value_extractor_config);
+    let value_extractor = network_path.var("value_extractor", &dimensions, Init::KaimingUniform);
 
     BilinearSelfAttention {
         full_dimension,
@@ -218,7 +242,7 @@ impl KModule for BilinearSelfAttention {
         let softmax_weights = pre_softmax_weights.softmax(2, Kind::Float);
 
         //N x K x F
-        let values = self.value_extractor.forward(&xs_forward);
+        let values = xs_forward.matmul(&self.value_extractor);
         
         //N x K x F
         let output_tensor = softmax_weights.matmul(&values);
