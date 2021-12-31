@@ -210,8 +210,11 @@ impl KModule for BilinearSelfAttention {
         let xs_forward = Tensor::stack(xs, 1);
         //N x F x K
         let xs_reverse = Tensor::stack(xs, 2);
+
+        let scaled_interaction_matrix = self.scaling_factor * &self.interaction_matrix;
+
         //N x K x K
-        let pre_softmax_weights = xs_forward.matmul(&self.interaction_matrix).matmul(&xs_reverse);
+        let pre_softmax_weights = xs_forward.matmul(&scaled_interaction_matrix).matmul(&xs_reverse);
         let softmax_weights = pre_softmax_weights.softmax(2, Kind::Float);
 
         //N x K x F
