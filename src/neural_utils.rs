@@ -124,27 +124,71 @@ pub fn residual_attention_layer_with_global_track<'a, T : Borrow<Path<'a>>>(netw
     }
 }
 
+pub trait TriModule : std::fmt::Debug + Send {
+    fn forward(&self, xs : &Tensor, ys : &Tensor, zs : &Tensor) -> Tensor;
+}
+
+#[derive(Debug)]
+pub struct TriConcat { }
+
+#[derive(Debug)]
+pub struct TriConcatThenSequential {
+    trimod : TriConcat,
+    seq : Sequential
+}
+
+impl TriModule for TriConcat {
+    fn forward(&self, xs : &Tensor, ys : &Tensor, zs : &Tensor) -> Tensor {
+        let concatted = Tensor::concat(&[xs, ys, zs], 1i64);
+        concatted
+    }
+}
+
+impl TriModule for TriConcatThenSequential {
+    fn forward(&self, xs : &Tensor, ys : &Tensor, zs : &Tensor) -> Tensor {
+        let init = self.trimod.forward(xs, ys, zs);
+        let rest = self.seq.forward(&init);
+        rest
+    }
+}
+
+impl TriConcatThenSequential {
+    pub fn add<M : Module + 'static>(self, layer : M) -> Self {
+        let sequential = self.seq.add(layer);
+        TriConcatThenSequential {
+            trimod : self.trimod,
+            seq : sequential
+        }
+    }
+    pub fn add_fn<F>(self, f : F) -> Self 
+    where
+        F : 'static + Fn(&Tensor) -> Tensor + Send,
+    {
+        self.add(tch::nn::func(f))
+    }
+}
+
 pub trait BiModule : std::fmt::Debug + Send {
     fn forward(&self, xs : &Tensor, ys : &Tensor) -> Tensor;
 }
 
 #[derive(Debug)]
-pub struct Concat { }
+pub struct BiConcat { }
 
 #[derive(Debug)]
-pub struct ConcatThenSequential { 
-    bimod : Concat,
+pub struct BiConcatThenSequential { 
+    bimod : BiConcat,
     seq : Sequential
 }
 
-impl BiModule for Concat {
+impl BiModule for BiConcat {
     fn forward(&self, xs : &Tensor, ys : &Tensor) -> Tensor {
         let concatted = Tensor::concat(&[xs, ys], 1i64);
         concatted
     }
 }
 
-impl BiModule for ConcatThenSequential {
+impl BiModule for BiConcatThenSequential {
     fn forward(&self, xs : &Tensor, ys : &Tensor) -> Tensor {
         let init = self.bimod.forward(xs, ys);
         let rest = self.seq.forward(&init);
@@ -152,10 +196,10 @@ impl BiModule for ConcatThenSequential {
     }
 }
 
-impl ConcatThenSequential {
+impl BiConcatThenSequential {
     pub fn add<M : Module + 'static>(self, layer : M) -> Self {
         let sequential = self.seq.add(layer);
-        ConcatThenSequential {
+        BiConcatThenSequential {
             bimod : self.bimod,
             seq : sequential
         }
@@ -168,11 +212,20 @@ impl ConcatThenSequential {
     }
 }
 
-pub fn concat_then_seq() -> ConcatThenSequential {
-    let bimod = Concat { };
+pub fn bi_concat_then_seq() -> BiConcatThenSequential {
+    let bimod = BiConcat { };
     let seq = nn::seq();
-    ConcatThenSequential {
+    BiConcatThenSequential {
         bimod,
+        seq
+    }
+}
+
+pub fn tri_concat_then_seq() -> TriConcatThenSequential {
+    let trimod = TriConcat { };
+    let seq = nn::seq();
+    TriConcatThenSequential {
+        trimod,
         seq
     }
 }

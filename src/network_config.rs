@@ -18,15 +18,12 @@ use core::iter::Sum;
 ///F : feature dims
 pub struct NetworkConfig {
     ///Injection network, taking matrix, target pairs, and turning them into initial features -- M x M -> F
-    injector_net : ConcatThenSequential,
+    injector_net : BiConcatThenSequential,
     ///Main network - a stack of multi-head residual layers interspersed with RELU. F -> F
     main_net : ResidualAttentionStackWithGlobalTrack,
-    ///F x F -> F, taking (single input, global input)
-    left_policy_extraction_net : ConcatThenSequential,
-    ///F x F -> F, taking (single input, global input)
-    right_policy_extraction_net : ConcatThenSequential,
-    ///Single scalar to scale the unnormalized policy after the dot-products
-    policy_confidence_scaling : Tensor
+    ///Policy extraction network, taking "left", "right", 
+    ///and "global" feature maps -- F x F x F -> F
+    policy_extraction_net : TriConcatThenSequential
 }
 
 pub struct RolloutState {
@@ -49,16 +46,11 @@ impl NetworkConfig {
     pub fn new(params : &Params, vs : &nn::Path) -> NetworkConfig {
         let injector_net = injector_net(params, vs / "injector");
         let main_net = main_net(params, vs / "main");
-        let left_policy_extraction_net = half_policy_extraction_net(params, vs / "left_policy_vector_supplier");
-        let right_policy_extraction_net = half_policy_extraction_net(params, vs / "right_policy_vector_supplier");
-        let policy_confidence_scaling = vs.var("policy_confidence_scaling", &[], 
-                                               Init::Uniform {lo : 0.5, up : 1.0});
+        let policy_extraction_net = policy_extraction_net(params, vs / "policy_extractor");
         NetworkConfig {
             injector_net,
             main_net,
-            left_policy_extraction_net,
-            right_policy_extraction_net,
-            policy_confidence_scaling
+            policy_extraction_net
         }
     }
     pub fn start_rollout(&self, game_state : GameState) -> RolloutState {
@@ -157,31 +149,28 @@ impl NetworkConfig {
 
         let mut main_net_outputs = self.main_net.forward(&main_net_inputs); 
         let main_net_global_output = main_net_outputs.pop().unwrap();
+        //K x NxF
         let main_net_individual_outputs = main_net_outputs;
-
-        //Compute left and right policy vectors
-        let mut left_policy_vecs = Vec::new();
-        let mut right_policy_vecs = Vec::new();
-        for i in 0..k {
-            let main_net_individual_output = &main_net_individual_outputs[i];
-            let left_policy_vec = self.left_policy_extraction_net
-                                  .forward(main_net_individual_output, &main_net_global_output);
-            let right_policy_vec = self.right_policy_extraction_net
-                                  .forward(main_net_individual_output, &main_net_global_output);
-            left_policy_vecs.push(left_policy_vec);
-            right_policy_vecs.push(right_policy_vec);
-        }
-
-        //Combine the left and right policy vectors by doing pairwise dot-products
-        //Each policy vec is NxF
-        //NxKxF
-        let left_policy_mat = Tensor::stack(&left_policy_vecs, 1);
-        //NxFxK
-        let right_policy_mat = Tensor::stack(&right_policy_vecs, 2);
-        //NxKxK
         
-        let mut unnormalized_policy_mat = left_policy_mat.matmul(&right_policy_mat);
-        unnormalized_policy_mat *= &(1.0 + self.policy_confidence_scaling.celu());
+        let mut policy_tensors_by_left = Vec::new();
+        //Compute policy logits for all left and right vectors
+        for i in 0..k {
+            let left_input = &main_net_individual_outputs[i];
+
+            let mut policy_logits_for_left = Vec::new();
+            for j in 0..k {
+                let right_input = &main_net_individual_outputs[j]; 
+                //Nx1
+                let policy_logit = self.policy_extraction_net.forward(left_input, right_input, &main_net_global_output);
+                policy_logits_for_left.push(policy_logit);
+            }
+
+            //NxK
+            let policy_tensor_for_left = Tensor::concat(&policy_logits_for_left, 1);
+            policy_tensors_by_left.push(policy_tensor_for_left);
+        }
+        //NxKxK
+        let unnormalized_policy_mat = Tensor::stack(&policy_tensors_by_left, 1);
         unnormalized_policy_mat
     }
 
