@@ -261,7 +261,11 @@ pub struct BilinearSelfAttention {
     pub interaction_matrix : Tensor,
     ///Linear transform from full_dimension -> full_dimension whose effect will be modulated by the
     ///interaction matrix
-    pub value_extractor : Tensor
+    pub value_extractor : Tensor,
+    ///Left-bias for the interaction matrix
+    pub left_bias : Tensor,
+    ///Right-bias for the interaction matrix
+    pub right_bias : Tensor
 }
 
 pub fn bilinear_self_attention<'a, T : Borrow<Path<'a>>>(network_path : T, 
@@ -273,11 +277,22 @@ pub fn bilinear_self_attention<'a, T : Borrow<Path<'a>>>(network_path : T,
     let interaction_matrix = network_path.var("interaction_matrix", &dimensions, Init::KaimingUniform);
     let value_extractor = network_path.var("value_extractor", &dimensions, Init::KaimingUniform);
 
+    let bias_dimensions = vec![full_dimension as i64];
+
+    let bias_init = Init::Uniform {
+        lo : -scaling_factor as f64,
+        up : scaling_factor as f64
+    };
+    let left_bias = network_path.var("left_bias", &bias_dimensions, bias_init);
+    let right_bias = network_path.var("right_bias", &bias_dimensions, bias_init);
+
     BilinearSelfAttention {
         full_dimension,
         scaling_factor,
         interaction_matrix,
-        value_extractor
+        value_extractor,
+        left_bias,
+        right_bias
     }
 }
 
@@ -285,13 +300,15 @@ impl KModule for BilinearSelfAttention {
     fn forward(&self, xs : &[Tensor]) -> Vec<Tensor> {
         //N x K x F
         let xs_forward = Tensor::stack(xs, 1);
+        let xs_forward_biased = &xs_forward + &self.left_bias;
+
         //N x F x K
-        let xs_reverse = Tensor::stack(xs, 2);
+        let xs_reverse_biased = (&xs_forward + &self.right_bias).transpose(1, 2);
 
         let scaled_interaction_matrix = self.scaling_factor * &self.interaction_matrix;
 
         //N x K x K
-        let pre_softmax_weights = xs_forward.matmul(&scaled_interaction_matrix).matmul(&xs_reverse);
+        let pre_softmax_weights = xs_forward_biased.matmul(&scaled_interaction_matrix).matmul(&xs_reverse_biased);
         let softmax_weights = pre_softmax_weights.softmax(2, Kind::Float);
 
         //N x K x F
