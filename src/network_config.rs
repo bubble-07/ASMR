@@ -17,8 +17,11 @@ use core::iter::Sum;
 ///M : matrix (flattened) dims
 ///F : feature dims
 pub struct NetworkConfig {
-    ///Injection network, taking matrix, target pairs, and turning them into initial features -- M x M -> F
-    injector_net : BiConcatThenSequential,
+    ///Injection network for general matrix set elements
+    ///taking matrix, target pairs, and turning them into initial features -- M x M -> F
+    general_injector_net : BiConcatThenSequential,
+    ///Injection network for target matrices -- M -> F
+    target_injector_net : nn::Sequential,
     ///Main network - a stack of multi-head residual layers interspersed with RELU. F -> F
     main_net : ResidualAttentionStackWithGlobalTrack,
     ///Policy extraction network, taking "left", "right", 
@@ -28,27 +31,33 @@ pub struct NetworkConfig {
 
 pub struct RolloutState {
     pub game_state : GameState,
-    ///The results of passing (source, target) matrix pairings through the injector_net
-    single_embeddings : Vec<Tensor>
+    ///The results of passing (source, target) matrix pairings through the general_injector_net
+    single_embeddings : Vec<Tensor>,
+    ///The results of passing the target matrix through the target_injector_net
+    target_embedding : Tensor
 }
 
 impl Clone for RolloutState {
     fn clone(&self) -> Self {
         let single_embeddings = self.single_embeddings.iter().map(|x| x.copy()).collect();
+        let target_embedding = self.target_embedding.copy();
         RolloutState {
             game_state : self.game_state.clone(),
-            single_embeddings
+            single_embeddings,
+            target_embedding
         }
     }
 }
 
 impl NetworkConfig {
     pub fn new(params : &Params, vs : &nn::Path) -> NetworkConfig {
-        let injector_net = injector_net(params, vs / "injector");
+        let general_injector_net = general_injector_net(params, vs / "general_injector");
+        let target_injector_net = target_injector_net(params, vs / "target_injector");
         let main_net = main_net(params, vs / "main");
         let policy_extraction_net = policy_extraction_net(params, vs / "policy_extractor");
         NetworkConfig {
-            injector_net,
+            general_injector_net,
+            target_injector_net,
             main_net,
             policy_extraction_net
         }
@@ -61,9 +70,12 @@ impl NetworkConfig {
 
         let single_embeddings = self.get_single_embeddings(&flattened_matrix_set, &flattened_matrix_target);
 
+        let target_embedding = self.get_target_embedding(&flattened_matrix_target);
+
         RolloutState {
             game_state,
-            single_embeddings
+            single_embeddings,
+            target_embedding
         }
     }
 
@@ -78,13 +90,14 @@ impl NetworkConfig {
        
         let new_mat = game_state.get_newest_matrix();
         let new_tensor = vector_to_tensor(flatten_matrix(new_mat.view()));
-        let new_embedding = self.injector_net.forward(&new_tensor, &flattened_matrix_target);
+        let new_embedding = self.general_injector_net.forward(&new_tensor, &flattened_matrix_target);
 
         single_embeddings.push(new_embedding);
 
         RolloutState {
             game_state,
-            single_embeddings
+            single_embeddings,
+            target_embedding : rollout_state.target_embedding
         }
     }
 
@@ -92,8 +105,9 @@ impl NetworkConfig {
         let _guard = no_grad_guard();
 
         let single_embeddings = &rollout_state.single_embeddings;
+        let target_embedding = &rollout_state.target_embedding;
 
-        let policy_tensor = self.get_policy(&single_embeddings);
+        let policy_tensor = self.get_policy(&single_embeddings, target_embedding);
         let policy_mat = tensor_to_matrix(&policy_tensor);
         let (ind_one, ind_two) = sample_index_pair(policy_mat.view(), rng);
 
@@ -121,29 +135,31 @@ impl NetworkConfig {
         self.complete_rollout(rollout_state, rng)
     }
 
+    fn get_target_embedding(&self, flattened_matrix_target : &Tensor) -> Tensor {
+        self.target_injector_net.forward(flattened_matrix_target)
+    }
+
     fn get_single_embeddings(&self, flattened_matrix_set : &[Tensor], flattened_matrix_target : &Tensor)
                             -> Vec<Tensor> {
         let k = flattened_matrix_set.len();
         let mut single_embeddings = Vec::new();
         for i in 0..k {
             let flattened_matrix = &flattened_matrix_set[i];
-            let embedding = self.injector_net.forward(flattened_matrix, flattened_matrix_target);
+            let embedding = self.general_injector_net.forward(flattened_matrix, flattened_matrix_target);
             single_embeddings.push(embedding);
         }
         single_embeddings
     }
 
-    fn get_unnormalized_policy(&self, single_embeddings : &[Tensor]) -> Tensor {
+    fn get_unnormalized_policy(&self, single_embeddings : &[Tensor], target_embedding : &Tensor) -> Tensor {
         let k = single_embeddings.len();
-
-        let mut averaged_embedding = Iterator::sum(single_embeddings.iter());
-        averaged_embedding *= (1.0f32 / (k as f32));
 
         let mut main_net_inputs = Vec::new();
         for single_embedding in single_embeddings {
             main_net_inputs.push(single_embedding.shallow_clone());
         }
-        main_net_inputs.push(averaged_embedding);
+        //The "global" input is initially the embedidng for the target
+        main_net_inputs.push(target_embedding.shallow_clone());
 
         let main_net_inputs = main_net_inputs;
 
@@ -177,10 +193,10 @@ impl NetworkConfig {
     ///Given a collection of K feature vector stacks from the injector_net, 
     ///(dimension NxF, N is the number of samples and F is the number of features), yields a computed Policy [Matrix stack
     ///of dimension NxKxK] tensor.
-    fn get_policy(&self, single_embeddings : &[Tensor]) -> Tensor {
+    fn get_policy(&self, single_embeddings : &[Tensor], target_embedding : &Tensor) -> Tensor {
         let k = single_embeddings.len();
         //NxKxK
-        let unnormalized_policy_mat = self.get_unnormalized_policy(single_embeddings);
+        let unnormalized_policy_mat = self.get_unnormalized_policy(single_embeddings, target_embedding);
 
         let n = unnormalized_policy_mat.size()[0];
 
@@ -201,12 +217,14 @@ impl NetworkConfig {
 
         //First, compute the embeddings for every (input, target) pair
         let single_embeddings = self.get_single_embeddings(flattened_matrix_set, flattened_matrix_target);
+        //Then compute the target's embedding
+        let target_embedding = self.get_target_embedding(flattened_matrix_target);
 
         //Then compute the policy from those embeddings
         let policy_mat = if (as_unnormalized) {
-            self.get_unnormalized_policy(&single_embeddings)
+            self.get_unnormalized_policy(&single_embeddings, &target_embedding)
         } else {
-            self.get_policy(&single_embeddings)
+            self.get_policy(&single_embeddings, &target_embedding)
         };
 
         policy_mat
