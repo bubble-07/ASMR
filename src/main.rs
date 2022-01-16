@@ -19,6 +19,8 @@ mod training_examples;
 
 use tch::{kind, Tensor, nn::Adam, nn::OptimizerConfig, Cuda};
 use std::fs;
+use std::time::Duration;
+use std::time::Instant;
 use std::env;
 use crate::game_state::*;
 use crate::params::*;
@@ -31,6 +33,10 @@ use std::path::Path;
 
 fn print_help() {
     println!("usage:
+ASMR time_games [game_config_path] [network_config_path] [game_time_csv_path]
+    Using the given game configuration json and network configuration, randomly-generates
+    and runs a bunch of games, outputting the time since game start -> minimal distance from target
+    distribution for each game, one after the other.
 ASMR run_game [game_config_path] [network_config_path] [game_data_output_path] [dotfile_output_path]?
     Using the given game configuration json and network configuration, randomly-generates
     and runs a game, outputting finalized game-data (training data) to the given output path.
@@ -113,6 +119,16 @@ fn main() {
                     let training_data_output_path = &args[4];
                     distill_game_data_command(params, game_data_root, training_data_output_path);
                 },
+                "time_games" => {
+                    if (args.len() < 4) {
+                        eprintln!("error: not enough arguments");
+                        print_help();
+                        return;
+                    }
+                    let network_config_path = &args[3];
+                    let timing_csv_output_path = &args[4];
+                    time_games_command(params, network_config_path, timing_csv_output_path); 
+                }
                 "run_game" => {
                     if (args.len() < 5) {
                         eprintln!("error: not enough arguments");
@@ -231,6 +247,64 @@ fn gen_network_config_command(params : Params, network_config_output_path : &str
     }
 }
 
+fn load_network_config_for_inference(params : &Params, network_config_path : &str) -> NetworkConfig {
+    let mut vs = tch::nn::VarStore::new(tch::Device::Cpu);
+    let network_config = NetworkConfig::new(params, &vs.root());
+
+    let maybe_load_result = vs.load(&Path::new(network_config_path));
+    match (maybe_load_result) {
+        Result::Ok(_) => {
+            println!("Successfully loaded network config");
+            network_config
+        },
+        Result::Err(e) => {
+            eprintln!("Failed to read network config: {}", e);
+            panic!();
+        }
+    }
+}
+
+fn time_games_command(params : Params,
+                      network_config_path : &str,
+                      timing_csv_output_path : &str) {
+    let mut rng = rand::thread_rng();
+
+    let network_config = load_network_config_for_inference(&params, network_config_path);
+    let rollout_strategy = params.get_rollout_strategy();
+
+    for game_number in 0..params.num_timing_games {
+        let game_state = params.generate_random_game(&mut rng);
+        let mut min_distance = game_state.get_distance();
+
+        let mut game_tree = GameTree::new(game_state);
+
+        let mut observations = Vec::new();
+
+        println!("Timing game {}...", game_number);
+
+        let start_instant = Instant::now();
+        
+        for iter_number in 0..params.iters_per_game {
+            let distance = game_tree.update_iteration(rollout_strategy, &network_config, &mut rng);
+            if (distance < min_distance) {
+                min_distance = distance;
+                let duration_elapsed = start_instant.elapsed(); 
+                let value_elapsed = duration_elapsed.as_micros();
+                let observation = (iter_number, value_elapsed, min_distance);
+                observations.push(observation);
+                println!("{}, {}, {}", iter_number, value_elapsed, min_distance);
+
+                if (distance == 0.0f32) {
+                    //If we reach the goal, we're done with this game, move on to the next.
+                    break;
+                }
+            }
+        }
+    }
+
+}
+
+
 fn run_game_command(params : Params, 
                     network_config_path : &str,
                     game_data_output_path : &str,
@@ -239,23 +313,12 @@ fn run_game_command(params : Params,
     let game_state = params.generate_random_game(&mut rng);
     let mut game_tree = GameTree::new(game_state);
 
-    let mut vs = tch::nn::VarStore::new(tch::Device::Cpu);
-    let network_config = NetworkConfig::new(&params, &vs.root());
-
-    let maybe_load_result = vs.load(&Path::new(network_config_path));
-    match (maybe_load_result) {
-        Result::Ok(_) => {
-            println!("Successfully loaded network config");
-        },
-        Result::Err(e) => {
-            eprintln!("Failed to read network config: {}", e);
-            return;
-        }
-    }
+    let network_config = load_network_config_for_inference(&params, network_config_path);
+    let rollout_strategy = params.get_rollout_strategy();
 
     for i in 0..params.iters_per_game {
         println!("Iteration: {}", i);
-        game_tree.update_iteration(&network_config, &mut rng);
+        game_tree.update_iteration(rollout_strategy, &network_config, &mut rng);
     }
     match (maybe_dotfile_output_path) {
         Option::Some(dotfile_output_path) => {

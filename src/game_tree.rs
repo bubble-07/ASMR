@@ -42,6 +42,57 @@ pub struct GameTreeTraverser {
     pub game_state : GameState
 }
 
+#[derive(Clone, Copy)]
+pub enum RolloutStrategy {
+    NetworkConfig,
+    Random,
+    Greedy
+}
+
+impl RolloutStrategy {
+    pub fn start_rollout(self, network_config : &NetworkConfig, game_state : GameState) -> GeneralRollout {
+        match (self) {
+            RolloutStrategy::NetworkConfig => {
+                let rollout_state = network_config.start_rollout(game_state);
+                GeneralRollout::NetworkConfig(rollout_state)
+            },
+            RolloutStrategy::Random => GeneralRollout::Random(game_state),
+            RolloutStrategy::Greedy => GeneralRollout::Greedy(game_state)
+        }
+    }
+}
+
+#[derive(Clone)]
+pub enum GeneralRollout {
+    NetworkConfig(RolloutState),
+    Random(GameState),
+    Greedy(GameState)
+}
+
+impl GeneralRollout {
+    pub fn manual_step_rollout(self, network_config : &NetworkConfig, added_matrix : Array2<f32>) -> Self {
+        match (self) {
+            GeneralRollout::NetworkConfig(rollout_state) => GeneralRollout::NetworkConfig(network_config.manual_step_rollout(rollout_state, added_matrix)),
+            GeneralRollout::Random(game_state) => GeneralRollout::Random(game_state.add_matrix(added_matrix)),
+            GeneralRollout::Greedy(game_state) => GeneralRollout::Greedy(game_state.add_matrix(added_matrix))
+        }
+    }
+    pub fn get_game_state(&self) -> &GameState {
+        match (&self) {
+            GeneralRollout::NetworkConfig(rollout_state) => &rollout_state.game_state,
+            GeneralRollout::Random(game_state) => &game_state,
+            GeneralRollout::Greedy(game_state) => &game_state
+        }
+    }
+    pub fn complete_rollout<R : Rng + ?Sized>(self, network_config : &NetworkConfig, rng : &mut R) -> f32 {
+        match (self) {
+            GeneralRollout::NetworkConfig(rollout_state) => network_config.complete_rollout(rollout_state, rng),
+            GeneralRollout::Random(game_state) => game_state.complete_random_rollout(rng),
+            GeneralRollout::Greedy(game_state) => game_state.complete_greedy_rollout()
+        }
+    }
+}
+
 
 impl GameTree {
     pub fn new(init_game_state : GameState) -> GameTree {
@@ -155,7 +206,13 @@ impl GameTree {
             game_state
         }
     }
-    pub fn update_iteration<R : Rng + ?Sized>(&mut self, network_config : &NetworkConfig, rng : &mut R) {
+    ///Updates this game tree using MCTS with playouts determined by the passed network config
+    ///and with random choices determined by the passed Rng. Returns the minimal distance to
+    ///the target along the paths taken in the MCTS iteration, which includes the minimal
+    ///distances achieved by the playouts during node-expansion.
+    pub fn update_iteration<R : Rng + ?Sized>(&mut self, rollout_strategy : RolloutStrategy,
+                                              network_config : &NetworkConfig, 
+                                              rng : &mut R) -> f32 {
         let mut traverser = self.traverse_from_root();
         while (traverser.has_expanded_children(&self) && traverser.has_remaining_turns()) {
             traverser.move_to_best_child(self, rng);
@@ -163,11 +220,19 @@ impl GameTree {
         if (!traverser.has_remaining_turns()) {
             //All-expanded children, but we ran out of turns. No big deal,
             //this traversal was still probably useful to update the edge visit-counts
-            return;
+            return traverser.game_state.get_distance();
         }
         //Otherwise, we must be at a place where we should expand all of the children.
-        let child_values = traverser.expand_children(self, network_config, rng);        
+        let child_values = traverser.expand_children(self, rollout_strategy, network_config, rng);        
+        let mut minimal_child_value = f32::INFINITY; 
+        for child_value in child_values.iter() {
+            if (*child_value < minimal_child_value) {
+                minimal_child_value = *child_value;
+            }
+        }
         traverser.update_distributions_to_root(self, child_values);
+
+        minimal_child_value
     }
 }
 
@@ -307,10 +372,10 @@ impl GameTreeTraverser {
     ///NetworkConfig for performing rollouts (if needed). Returns a collection
     ///of all of the distanced derived from rollouts (or from the actual values, if terminal nodes)
     ///which came from the expanded children
-    fn expand_children<R : Rng + ?Sized>(&self, game_tree : &mut GameTree, 
+    fn expand_children<R : Rng + ?Sized>(&self, game_tree : &mut GameTree, rollout_strategy : RolloutStrategy,
                                          network_config : &NetworkConfig, rng : &mut R) -> Vec<f32> {
 
-        let parent_rollout_state = network_config.start_rollout(self.game_state.clone());
+        let parent_rollout_state = rollout_strategy.start_rollout(network_config, self.game_state.clone());
 
         let current_node_index = self.current_node_index();
 
@@ -346,13 +411,13 @@ impl GameTreeTraverser {
 
                 //Prepare to perform a rollout if needed
                 let mut child_rollout_state = parent_rollout_state.clone();
-                child_rollout_state = network_config.manual_step_rollout(child_rollout_state, added_matrix);
+                child_rollout_state = child_rollout_state.manual_step_rollout(network_config, added_matrix);
 
-                let child_num_turns = child_rollout_state.game_state.get_remaining_turns();
+                let child_num_turns = child_rollout_state.get_game_state().get_remaining_turns();
 
                 let game_end_distance_distribution = if (child_num_turns > 0) {
                     //For a non-terminal node, we assign a single-rollout-updated uninformative prior.
-                    let rollout_distance = network_config.complete_rollout(child_rollout_state, rng);
+                    let rollout_distance = child_rollout_state.complete_rollout(network_config, rng);
                     result.push(rollout_distance);
                     NormalInverseChiSquared::Uninformative.update(rollout_distance as f64)
                 } else {

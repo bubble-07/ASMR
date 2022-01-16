@@ -9,6 +9,7 @@ use ndarray::{Array, ArrayBase};
 use std::convert::TryInto;
 use serde::{Serialize, Deserialize};
 use crate::synthetic_data::*;
+use crate::game_tree::*;
 
 #[derive(Serialize, Deserialize)]
 pub struct Params {
@@ -33,8 +34,16 @@ pub struct Params {
     pub success_probability_ground_truth_num_moves : f64,
     ///Upper-bound on the number of turns allowed in the game
     pub max_num_turns : usize,
-    ///Number of monte-carlo-tree-search updates per game
+    ///Cap on the number of monte-carlo-tree-search updates per game.
+    ///In the case of "run_game", exactly this many iters will be performed,
+    ///but in the case of "time_games", this is the max number of iters per game,
+    ///since achieving a distance of zero to the target ends the timing episode.
     pub iters_per_game : usize,
+    ///Number of games for timing purposes
+    pub num_timing_games : usize,
+    ///The strategy to employ for performing rollouts during MCTS.
+    ///Can be "greedy", "random", or "network"
+    pub rollout_strategy : String,
     ///Number of batches before evaluating validation loss
     ///and potentially saving out the updated network configuration for training
     pub train_batches_per_save : usize,
@@ -55,6 +64,17 @@ pub struct Params {
 }
 
 impl Params {
+    pub fn get_rollout_strategy(&self) -> RolloutStrategy {
+        match (self.rollout_strategy.as_str()) {
+            "greedy" => RolloutStrategy::Greedy,
+            "random" => RolloutStrategy::Random,
+            "network" => RolloutStrategy::NetworkConfig,
+            x => {
+                eprintln!("Failed to interpret rollout strategy: {}", x);
+                panic!();
+            }
+        }
+    }
     pub fn get_flattened_matrix_dim(&self) -> i64 {
         (self.matrix_dim * self.matrix_dim).try_into().unwrap()
     }
