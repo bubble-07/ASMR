@@ -279,8 +279,11 @@ fn time_games_command(params : Params,
         let mut game_tree = GameTree::new(game_state);
 
         let mut observations = Vec::new();
+        
+        observations.push((0, 0, min_distance));
 
         println!("Timing game {}...", game_number);
+        println!("{}, {}, {}", 0, 0, min_distance);
 
         let start_instant = Instant::now();
         
@@ -289,10 +292,10 @@ fn time_games_command(params : Params,
             if (distance < min_distance) {
                 min_distance = distance;
                 let duration_elapsed = start_instant.elapsed(); 
-                let value_elapsed = duration_elapsed.as_micros();
-                let observation = (iter_number, value_elapsed, min_distance);
+                let value_elapsed = duration_elapsed.as_millis();
+                let observation = (iter_number + 1, value_elapsed, min_distance);
                 observations.push(observation);
-                println!("{}, {}, {}", iter_number, value_elapsed, min_distance);
+                println!("{}, {}, {}", iter_number + 1, value_elapsed, min_distance);
 
                 if (distance == 0.0f32) {
                     //If we reach the goal, we're done with this game, move on to the next.
