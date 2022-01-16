@@ -7,7 +7,7 @@ use crate::neural_utils::*;
 ///BiModule that takes a flattened matrix (dimension FLATTENED_MATRIX_DIM)
 ///for an input and a flattened matrix (dimension FLATTENED_MATRIX_DIM) for a target
 ///to descriptors of NUM_FEAT_MAPS size.
-pub fn general_injector_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs : T) -> BiConcatThenSequential {
+pub fn injector_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs : T) -> BiConcatThenSequential {
     let vs = vs.borrow();
     let mut net = bi_concat_then_seq();
     let two_matrix_dim = 2 * params.get_flattened_matrix_dim();
@@ -22,26 +22,6 @@ pub fn general_injector_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs : T) 
                       vs / format!("layer_{}", i),
                       params.num_feat_maps));
     } 
-    net
-}
-
-///Module that takes a flattened matrix (dimension FLATTENED_MATRIX_DIM)
-///for a target matrix and yields a descriptor vector
-///of the target of NUM_FEAT_MAPS size.
-pub fn target_injector_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs : T) -> nn::Sequential {
-    let vs = vs.borrow();
-    let mut net = nn::seq();
-    net = net.add(nn::linear(
-                  vs / "init_linear",
-                  params.get_flattened_matrix_dim() as i64,
-                  params.num_feat_maps as i64,
-                  Default::default()
-                  ));
-    for i in 0..params.num_injection_layers {
-        net = net.add(linear_residual(
-                      vs / format!("layer_{}", i),
-                      params.num_feat_maps));
-    }
     net
 }
 
