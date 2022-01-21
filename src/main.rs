@@ -16,6 +16,7 @@ mod network;
 mod network_config;
 mod game_state;
 mod training_examples;
+mod network_rollout;
 
 use tch::{kind, Tensor, nn::Adam, nn::OptimizerConfig, Cuda};
 use std::fs;

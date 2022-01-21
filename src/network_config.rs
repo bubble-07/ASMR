@@ -18,28 +18,12 @@ use core::iter::Sum;
 ///F : feature dims
 pub struct NetworkConfig {
     ///Injection network, taking matrix, target pairs, and turning them into initial features -- M x M -> F
-    injector_net : BiConcatThenSequential,
-    ///Main network - a stack of multi-head residual layers interspersed with RELU. F -> F
-    main_net : ResidualAttentionStackWithGlobalTrack,
+    pub injector_net : BiConcatThenSequential,
+    ///Main network - a stack of attentional residual layers interspersed with RELU. K x F -> (K + 1) x F
+    pub main_net : ResidualAttentionStackWithGlobalTrack,
     ///Policy extraction network, taking "left", "right", 
     ///and "global" feature maps -- F x F x F -> F
-    policy_extraction_net : TriConcatThenSequential
-}
-
-pub struct RolloutState {
-    pub game_state : GameState,
-    ///The results of passing (source, target) matrix pairings through the injector_net
-    single_embeddings : Vec<Tensor>
-}
-
-impl Clone for RolloutState {
-    fn clone(&self) -> Self {
-        let single_embeddings = self.single_embeddings.iter().map(|x| x.copy()).collect();
-        RolloutState {
-            game_state : self.game_state.clone(),
-            single_embeddings
-        }
-    }
+    pub policy_extraction_net : TriConcatThenSequential
 }
 
 impl NetworkConfig {
@@ -53,75 +37,8 @@ impl NetworkConfig {
             policy_extraction_net
         }
     }
-    pub fn start_rollout(&self, game_state : GameState) -> RolloutState {
-        let _guard = no_grad_guard();
 
-        let flattened_matrix_set = game_state.get_flattened_matrix_set();
-        let flattened_matrix_target = game_state.get_flattened_matrix_target();
-
-        let single_embeddings = self.get_single_embeddings(&flattened_matrix_set, &flattened_matrix_target);
-
-        RolloutState {
-            game_state,
-            single_embeddings
-        }
-    }
-
-    pub fn manual_step_rollout(&self, rollout_state : RolloutState, new_mat : Array2<f32>) -> RolloutState {
-        let _guard = no_grad_guard();
-
-        let mut single_embeddings = rollout_state.single_embeddings;
-         
-        let game_state = rollout_state.game_state.add_matrix(new_mat);
-
-        let flattened_matrix_target = game_state.get_flattened_matrix_target();
-       
-        let new_mat = game_state.get_newest_matrix();
-        let new_tensor = vector_to_tensor(flatten_matrix(new_mat.view()));
-        let new_embedding = self.injector_net.forward(&new_tensor, &flattened_matrix_target);
-
-        single_embeddings.push(new_embedding);
-
-        RolloutState {
-            game_state,
-            single_embeddings
-        }
-    }
-
-    fn step_rollout<R : Rng + ?Sized>(&self, rollout_state : RolloutState, rng : &mut R) -> RolloutState {
-        let _guard = no_grad_guard();
-
-        let single_embeddings = &rollout_state.single_embeddings;
-
-        let policy_tensor = self.get_policy(&single_embeddings);
-        let policy_mat = tensor_to_matrix(&policy_tensor);
-        let (ind_one, ind_two) = sample_index_pair(policy_mat.view(), rng);
-
-        let game_state = &rollout_state.game_state;
-
-        let mat_one = game_state.get_matrix(ind_one);
-        let mat_two = game_state.get_matrix(ind_two);
-
-        let new_mat = mat_one.dot(&mat_two);
-        
-        self.manual_step_rollout(rollout_state, new_mat)
-    }
-    
-    pub fn complete_rollout<R : Rng + ?Sized>(&self, mut rollout_state : RolloutState, rng : &mut R) -> f32 {
-        let turns = rollout_state.game_state.get_remaining_turns();
-        for _ in 0..turns {
-            rollout_state = self.step_rollout(rollout_state, rng);
-        }
-        let value = rollout_state.game_state.get_distance();
-        value
-    }
-
-    pub fn perform_rollout<R : Rng + ?Sized>(&self, game_state : GameState, rng : &mut R) -> f32 {
-        let rollout_state = self.start_rollout(game_state);
-        self.complete_rollout(rollout_state, rng)
-    }
-
-    fn get_single_embeddings(&self, flattened_matrix_set : &[Tensor], flattened_matrix_target : &Tensor)
+    pub fn get_single_embeddings(&self, flattened_matrix_set : &[Tensor], flattened_matrix_target : &Tensor)
                             -> Vec<Tensor> {
         let k = flattened_matrix_set.len();
         let mut single_embeddings = Vec::new();
@@ -177,7 +94,7 @@ impl NetworkConfig {
     ///Given a collection of K feature vector stacks from the injector_net, 
     ///(dimension NxF, N is the number of samples and F is the number of features), yields a computed Policy [Matrix stack
     ///of dimension NxKxK] tensor.
-    fn get_policy(&self, single_embeddings : &[Tensor]) -> Tensor {
+    pub fn get_policy(&self, single_embeddings : &[Tensor]) -> Tensor {
         let k = single_embeddings.len();
         //NxKxK
         let unnormalized_policy_mat = self.get_unnormalized_policy(single_embeddings);

@@ -20,6 +20,20 @@ pub fn tensor_to_matrix(tensor : &Tensor) -> Array2<f32> {
     tensor_to_vector(tensor).into_shape(truncated_shape).unwrap().into_dimensionality::<Ix2>().unwrap()
 }
 
+pub fn vector_to_unbatched_tensor(vec : ArrayView1<f32>) -> Tensor {
+    let dim = vec.shape()[0];
+    let flat_result = Tensor::try_from(vec.to_slice().unwrap()).unwrap();
+    flat_result.reshape(&[dim as i64])
+}
+
+pub fn matrix_to_unbatched_tensor(mat : ArrayView2<f32>) -> Tensor {
+    let shape : Vec<i64> = mat.shape().iter().map(|s| *s as i64).collect();
+    let expanded_shape = vec![shape[0], shape[1]];
+    let flat_mat = flatten_matrix(mat);
+    let tensor = vector_to_tensor(flat_mat);
+    tensor.reshape(&expanded_shape)
+}
+
 pub fn vector_to_tensor(vec : ArrayView1<f32>) -> Tensor {
     let dim = vec.shape()[0];
     let flat_result = Tensor::try_from(vec.to_slice().unwrap()).unwrap();

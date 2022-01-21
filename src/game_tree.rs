@@ -5,6 +5,7 @@ use ndarray::*;
 use ndarray_linalg::*;
 
 use crate::network_config::*;
+use crate::network_rollout::*;
 use crate::array_utils::*;
 use crate::game_state::*;
 use crate::normal_inverse_chi_squared::*;
@@ -50,49 +51,35 @@ pub enum RolloutStrategy {
 }
 
 impl RolloutStrategy {
-    pub fn start_rollout(self, network_config : &NetworkConfig, game_state : GameState) -> GeneralRollout {
-        match (self) {
-            RolloutStrategy::NetworkConfig => {
-                let rollout_state = network_config.start_rollout(game_state);
-                GeneralRollout::NetworkConfig(rollout_state)
-            },
-            RolloutStrategy::Random => GeneralRollout::Random(game_state),
-            RolloutStrategy::Greedy => GeneralRollout::Greedy(game_state)
+    ///Takes a starting game state and the network config and rng to a vec filled with k^2 rollout results, one
+    ///for each potential next move in the current game-state with k matrices
+    pub fn complete_rollouts<R : Rng + ?Sized>(self, game_state : GameState, 
+                                              network_config : &NetworkConfig, rng : &mut R) -> Vec<f32> {
+        if let RolloutStrategy::NetworkConfig = self {
+            let mut network_rollout = NetworkRolloutState::new(game_state, network_config);
+            while (network_rollout.remaining_turns > 0) {
+                network_rollout = network_rollout.step(network_config);
+            }
+            let result = network_rollout.min_distances.into();
+            result
+        } else {
+            let mut result = Vec::new();
+            let current_set_size = game_state.matrix_set.size();
+            for i in 0..current_set_size {
+                for j in 0..current_set_size {
+                    let child_game_state = game_state.clone().perform_move(i, j);
+                    let value = match (self) {
+                        RolloutStrategy::Random => child_game_state.complete_random_rollout(rng),
+                        RolloutStrategy::Greedy => child_game_state.complete_greedy_rollout(),
+                        _ => panic!()
+                    };
+                    result.push(value);
+                }
+            }
+            result
         }
     }
 }
-
-#[derive(Clone)]
-pub enum GeneralRollout {
-    NetworkConfig(RolloutState),
-    Random(GameState),
-    Greedy(GameState)
-}
-
-impl GeneralRollout {
-    pub fn manual_step_rollout(self, network_config : &NetworkConfig, added_matrix : Array2<f32>) -> Self {
-        match (self) {
-            GeneralRollout::NetworkConfig(rollout_state) => GeneralRollout::NetworkConfig(network_config.manual_step_rollout(rollout_state, added_matrix)),
-            GeneralRollout::Random(game_state) => GeneralRollout::Random(game_state.add_matrix(added_matrix)),
-            GeneralRollout::Greedy(game_state) => GeneralRollout::Greedy(game_state.add_matrix(added_matrix))
-        }
-    }
-    pub fn get_game_state(&self) -> &GameState {
-        match (&self) {
-            GeneralRollout::NetworkConfig(rollout_state) => &rollout_state.game_state,
-            GeneralRollout::Random(game_state) => &game_state,
-            GeneralRollout::Greedy(game_state) => &game_state
-        }
-    }
-    pub fn complete_rollout<R : Rng + ?Sized>(self, network_config : &NetworkConfig, rng : &mut R) -> f32 {
-        match (self) {
-            GeneralRollout::NetworkConfig(rollout_state) => network_config.complete_rollout(rollout_state, rng),
-            GeneralRollout::Random(game_state) => game_state.complete_random_rollout(rng),
-            GeneralRollout::Greedy(game_state) => game_state.complete_greedy_rollout()
-        }
-    }
-}
-
 
 impl GameTree {
     pub fn new(init_game_state : GameState) -> GameTree {
@@ -375,9 +362,9 @@ impl GameTreeTraverser {
     fn expand_children<R : Rng + ?Sized>(&self, game_tree : &mut GameTree, rollout_strategy : RolloutStrategy,
                                          network_config : &NetworkConfig, rng : &mut R) -> Vec<f32> {
 
-        let parent_rollout_state = rollout_strategy.start_rollout(network_config, self.game_state.clone());
-
         let current_node_index = self.current_node_index();
+
+        let child_num_turns = self.game_state.get_remaining_turns() - 1;
 
         let current_set_size = self.game_state.get_num_matrices();
         let current_distance = self.game_state.get_distance();
@@ -386,8 +373,12 @@ impl GameTreeTraverser {
         let mut result = Vec::new();
 
         let mut edges = Vec::new();
+        let mut child_distances = Vec::new();
 
         let children_start_index = game_tree.nodes.len();
+
+        //For the first double-loop, update the edges for sure, since we can do that,
+        //and maybe update the nodes in the case that they're the last turn
         for i in 0..current_set_size {
             let left_matrix = self.game_state.matrix_set.get(i);
             for j in 0..current_set_size {
@@ -397,6 +388,8 @@ impl GameTreeTraverser {
 
                 let dist_to_added = sq_frob_dist(added_matrix.view(), target);
                 let child_current_distance = current_distance.min(dist_to_added);
+
+                child_distances.push(child_current_distance);
 
                 //We're going to create a roll-out for the node in a bit, which
                 //is why the visit count here is 1 and not zero.
@@ -409,29 +402,48 @@ impl GameTreeTraverser {
 
                 edges.push(edge);
 
-                //Prepare to perform a rollout if needed
-                let mut child_rollout_state = parent_rollout_state.clone();
-                child_rollout_state = child_rollout_state.manual_step_rollout(network_config, added_matrix);
-
-                let child_num_turns = child_rollout_state.get_game_state().get_remaining_turns();
-
-                let game_end_distance_distribution = if (child_num_turns > 0) {
-                    //For a non-terminal node, we assign a single-rollout-updated uninformative prior.
-                    let rollout_distance = child_rollout_state.complete_rollout(network_config, rng);
-                    result.push(rollout_distance);
-                    NormalInverseChiSquared::Uninformative.update(rollout_distance as f64)
-                } else {
-                    //For a terminal node, we assign the actual distance at the leaf
+                //In the case where this comprises the last turn, just go ahead and update the game
+                //tree nodes with this information.
+                if (child_num_turns == 0) {
                     result.push(child_current_distance);
-                    NormalInverseChiSquared::Certain(child_current_distance as f64)
-                };
 
-                let node = GameTreeNode {
-                    maybe_expanded_edges : Option::None,
-                    current_distance : child_current_distance,
-                    game_end_distance_distribution
-                };
-                game_tree.nodes.push(node);
+                    let game_end_distance_distribution = NormalInverseChiSquared::Certain(child_current_distance as f64);
+                    let node = GameTreeNode {
+                        maybe_expanded_edges : Option::None,
+                        current_distance : child_current_distance,
+                        game_end_distance_distribution
+                    };
+                    game_tree.nodes.push(node);
+                }
+            }
+        }
+
+        //Now, if there are still turns left for performing rollouts, perform the rollouts
+        //and use that to populate the values for the new nodes here
+        if (child_num_turns > 0) {
+            //First, perform the rollouts
+            let rollout_distances = rollout_strategy.complete_rollouts(self.game_state.clone(), 
+                                                     network_config, rng);
+            
+            //Then, update the nodes and the returned result
+            for i in 0..current_set_size {
+                for j in 0..current_set_size {
+                    let ind = i * current_set_size + j;
+                    let child_current_distance = child_distances[ind];
+                    let rollout_distance = rollout_distances[ind];
+
+                    result.push(rollout_distance);
+
+                    let game_end_distance_distribution = 
+                        NormalInverseChiSquared::Uninformative.update(rollout_distance as f64);
+
+                    let node = GameTreeNode {
+                        maybe_expanded_edges : Option::None,
+                        current_distance : child_current_distance,
+                        game_end_distance_distribution
+                    };
+                    game_tree.nodes.push(node);
+                }
             }
         }
         let expanded_edges = ExpandedEdges {
