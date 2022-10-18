@@ -4,34 +4,39 @@ extern crate ndarray_linalg;
 use ndarray::*;
 use ndarray_linalg::*;
 
+use serde::{Serialize, Deserialize};
 use crate::network_config::*;
 use crate::network_rollout::*;
+use crate::rollout_states::*;
 use crate::array_utils::*;
 use crate::game_state::*;
 use crate::normal_inverse_chi_squared::*;
-use crate::game_data::*;
 use std::fmt;
 
 use rand::Rng;
 
 use tch::{kind, Tensor};
 
+#[derive(Serialize, Deserialize)]
 pub struct GameTreeNode {
     pub maybe_expanded_edges : Option<ExpandedEdges>,
     pub current_distance : f32,
     pub game_end_distance_distribution : NormalInverseChiSquared
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct ExpandedEdges {
     pub children_start_index : usize,
     pub edges : Vec<GameTreeEdge>
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct GameTreeEdge {
     pub added_matrix : Array2<f32>,
     pub visit_count : usize
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct GameTree {
     pub nodes : Vec<GameTreeNode>,
     pub init_game_state : GameState
@@ -56,15 +61,18 @@ impl RolloutStrategy {
     pub fn complete_rollouts<R : Rng + ?Sized>(self, game_state : GameState, 
                                               network_config : &NetworkConfig, rng : &mut R) -> Vec<f32> {
         if let RolloutStrategy::NetworkConfig = self {
-            let mut network_rollout = NetworkRolloutState::new(game_state, network_config);
-            while (network_rollout.remaining_turns > 0) {
+            let rollout_states = RolloutStates::from_single_game_state(game_state);
+            //TODO: Expand the rollout state size by picking every subsequent option
+            let mut network_rollout = NetworkRolloutState::from_rollout_states(network_config, 
+                                                                               rollout_states);
+            while (network_rollout.rollout_states.remaining_turns > 0) {
                 network_rollout = network_rollout.step(network_config);
             }
-            let result = network_rollout.min_distances.into();
+            let result = network_rollout.rollout_states.min_distances.into();
             result
         } else {
             let mut result = Vec::new();
-            let current_set_size = game_state.matrix_set.size();
+            let current_set_size = game_state.matrix_set.len();
             for i in 0..current_set_size {
                 for j in 0..current_set_size {
                     let child_game_state = game_state.clone().perform_move(i, j);
@@ -135,54 +143,6 @@ impl GameTree {
         result
     }
 
-    pub fn extract_game_data(&self) -> GameData {
-        let flattened_matrix_target = flatten_matrix(self.init_game_state.target.view()).to_owned();
-
-        let mut result = GameData {
-            flattened_matrix_sets : Vec::new(),
-            flattened_matrix_target,
-            child_visit_probabilities : Vec::new()
-        };
-
-        let traverser = self.traverse_from_root();
-
-        self.extract_game_data_recursive(&mut result, traverser);
-        result
-    }
-
-    fn extract_game_data_recursive(&self, result : &mut GameData,
-                                                             traverser : GameTreeTraverser) {
-        let num_children = traverser.get_num_children(&self);
-        let num_children_sqrt = (num_children as f64).sqrt() as usize;
-        //We only need to do something here if we have children
-        if (num_children > 0) {
-            let mut child_tuples = traverser.get_child_tuples(&self);
-            let mut child_visit_count_matrix = Array::zeros((num_children_sqrt, num_children_sqrt));
-            let mut total_visits = 0;
-            for (child_tuple, i) in child_tuples.drain(..).zip(0..num_children) {
-                let (child_index, added_matrix, visit_count) = child_tuple;
-
-                let child_traverser = traverser.clone().manual_move(child_index, added_matrix);
-                self.extract_game_data_recursive(result, child_traverser);
-                
-                let left_index = i / num_children_sqrt;
-                let right_index = i % num_children_sqrt;
-
-                total_visits += visit_count;
-                child_visit_count_matrix[(left_index, right_index)] = visit_count;
-            }
-            let child_visit_probability_matrix = child_visit_count_matrix
-                                                 .mapv(|x| ((x as f64) / (total_visits as f64)) as f32);
-            
-            let flattened_matrix_set = traverser.game_state.matrix_set.get_flattened_vectors().iter()
-                                                          .map(|x| x.to_owned()).collect();
-
-
-            result.flattened_matrix_sets.push(flattened_matrix_set);
-            result.child_visit_probabilities.push(child_visit_probability_matrix);
-        }
-    }
-
     pub fn traverse_from_root(&self) -> GameTreeTraverser {
         let mut index_stack = Vec::new();
         index_stack.push(0);
@@ -200,6 +160,10 @@ impl GameTree {
     pub fn update_iteration<R : Rng + ?Sized>(&mut self, rollout_strategy : RolloutStrategy,
                                               network_config : &NetworkConfig, 
                                               rng : &mut R) -> f32 {
+        //TODO: Probably want playing a game to use this only on the second run.
+        //First run should just do a rollout straight from the root, and use that for
+        //a preliminary answer. Then, the first call to "update_iteration" should
+        //use that initial rollout to provide additional updated data? Maybe.
         let mut traverser = self.traverse_from_root();
         while (traverser.has_expanded_children(&self) && traverser.has_remaining_turns()) {
             traverser.move_to_best_child(self, rng);
@@ -366,7 +330,7 @@ impl GameTreeTraverser {
 
         let child_num_turns = self.game_state.get_remaining_turns() - 1;
 
-        let current_set_size = self.game_state.get_num_matrices();
+        let current_set_size = self.game_state.get_matrix_set().len();
         let current_distance = self.game_state.get_distance();
         let target = self.game_state.get_target();
 

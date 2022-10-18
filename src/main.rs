@@ -3,9 +3,10 @@
 #![allow(unused_imports)]
 #![allow(unused_parens)]
 
+mod visit_logit_matrices;
+mod network_module;
 mod synthetic_data;
-mod turn_data;
-mod game_data;
+mod rollout_states;
 mod game_tree;
 mod normal_inverse_chi_squared;
 mod array_utils;
@@ -15,8 +16,10 @@ mod neural_utils;
 mod network;
 mod network_config;
 mod game_state;
+mod batch_split_training_examples;
 mod training_examples;
 mod network_rollout;
+mod batch_split;
 
 use tch::{kind, Tensor, nn::Adam, nn::OptimizerConfig, Cuda};
 use std::fs;
@@ -26,9 +29,9 @@ use std::env;
 use crate::game_state::*;
 use crate::params::*;
 use crate::game_tree::*;
-use crate::game_data::*;
 use crate::training_examples::*;
 use crate::network_config::*;
+use crate::batch_split_training_examples::*;
 use std::str::from_utf8;
 use std::path::Path;
 
@@ -339,8 +342,7 @@ fn run_game_command(params : Params,
         },
         _ => {}
     }
-    let game_data = game_tree.extract_game_data();
-    let maybe_serialized_game_data = bincode::serialize(&game_data);
+    let maybe_serialized_game_data = bincode::serialize(&game_tree);
     match (maybe_serialized_game_data) {
         Result::Ok(serialized_game_data) => {
             let maybe_write_result = write_to_path(game_data_output_path, &serialized_game_data);
@@ -406,11 +408,10 @@ fn gen_synthetic_training_data_file_command(params : &Params, training_data_outp
 
     for _ in 0..params.num_synthetic_training_games {
         let game_path = params.generate_random_game_path(&mut rng);
-        let game_data = game_path.get_game_data();
-
-        builder.add_game_data(game_data, &mut rng); 
+        let annotated_game_path = game_path.annotate_path();
+        builder.add_annotated_game_path(annotated_game_path);
     }
-    let training_examples = builder.build(&mut rng);
+    let training_examples = builder.build();
 
     let output_path = Path::new(training_data_output_path);
     let maybe_save_result = training_examples.save(&output_path);
@@ -425,62 +426,8 @@ fn gen_synthetic_training_data_file_command(params : &Params, training_data_outp
 }
 
 fn distill_game_data_command(params : Params, game_data_root : &str, training_data_output_path : &str) {
-    let game_data_root_path = Path::new(game_data_root);
-    let maybe_dir_listing = fs::read_dir(&game_data_root_path);
-
-    let mut rng = rand::thread_rng();
-    let mut builder = TrainingExamplesBuilder::new(&params);
-
-    match (maybe_dir_listing) {
-        Result::Ok(dir_listing) => {
-            for maybe_entry in dir_listing {
-                match (maybe_entry) {
-                    Result::Ok(entry) => {
-                        let entry_path = entry.path();
-                        let maybe_serialized_game_data = read_from_path(entry_path.to_str().unwrap());
-                        match (maybe_serialized_game_data) {
-                            Result::Ok(serialized_game_data) => {
-                                let maybe_game_data = bincode::deserialize::<GameData>(&serialized_game_data);
-                                match (maybe_game_data) {
-                                    Result::Ok(game_data) => {
-                                        builder.add_game_data(game_data, &mut rng);
-                                    },
-                                    Result::Err(err) => {
-                                        eprintln!("Failed to deserialize contents of a file in the directory: {}", err);
-                                        return;
-                                    }
-                                }
-                            },
-                            Result::Err(err) => {
-                                eprintln!("Failed to read contents of a file in the directory: {}", err);
-                                return;
-                            }
-                        }
-                    },
-                    Result::Err(err) => {
-                        eprintln!("Failed to access contents of a file in the directory: {}", err);
-                        return;
-                    }
-                }
-            }
-        },
-        Result::Err(err) => {
-            eprintln!("Failed to list game data directory contents: {}", err);
-            return;
-        }
-    }
-    let training_examples = builder.build(&mut rng);
-
-    let output_path = Path::new(training_data_output_path);
-    let maybe_save_result = training_examples.save(&output_path);
-    match (maybe_save_result) {
-        Result::Ok(_) => {
-            println!("Successfully distilled and saved training data");
-        },
-        Result::Err(err) => {
-            eprintln!("Failed to write distilled training data: {}", err);
-        }
-    }
+    //TODO: reimplement me!
+    panic!();
 }
 
 fn train_command(params : Params, network_config_path : &str, training_data_path : &str) {
@@ -510,6 +457,11 @@ fn train_command(params : Params, network_config_path : &str, training_data_path
     match (maybe_training_examples) {
         Result::Ok(training_examples) => { 
             println!("Successfully loaded training examples");
+            let batch_split_training_examples = BatchSplitTrainingExamples::from_training_examples(
+                training_examples,
+                params.batch_size,
+                params.held_out_validation_batches,
+            );
 
             let adam = Adam {
                 wd : params.weight_decay_factor,
@@ -518,7 +470,7 @@ fn train_command(params : Params, network_config_path : &str, training_data_path
             let mut opt = adam.build(&vs, params.train_step_size).unwrap();
             let mut best_validation_loss = f64::INFINITY;
             loop {
-                let (train_loss, validation_loss) = network_config.run_training_epoch(&params, &training_examples, 
+                let (train_loss, validation_loss) = network_config.run_training_epoch(&params, &batch_split_training_examples, 
                                                                    &mut opt, device, &mut rng);
                 println!("train loss for the epoch: {} validation loss: {}", train_loss, validation_loss);
 

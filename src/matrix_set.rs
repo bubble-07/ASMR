@@ -7,53 +7,48 @@ use rand::seq::SliceRandom;
 
 use tch::{kind, Tensor};
 
+use serde::{Serialize, Deserialize};
 use ndarray::*;
 use ndarray_linalg::*;
 use crate::array_utils::*;
 use std::fmt;
 
-#[derive(Clone)]
-pub struct MatrixSet {
-    pub matrices : Vec<Array2<f32>>
-}
+#[derive(Clone, Serialize, Deserialize)]
+pub struct MatrixSet(pub Vec<Array2<f32>>);
 
 impl fmt::Display for MatrixSet {
     fn fmt(&self, f : &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", &self.matrices)
+        let MatrixSet(matrices) = &self;
+        write!(f, "{:?}", matrices)
     }
 }
-
 impl MatrixSet {
-    pub fn get_flattened_vectors(&self) -> Vec<ArrayView1<f32>> {
-        self.matrices.iter().map(|x| flatten_matrix(x.view())).collect()
-    }
-    pub fn get_flattened_tensors(&self) -> Vec<Tensor> {
+    pub fn to_flattened_vec(self) -> Vec<f32> {
+        let MatrixSet(mut matrices) = self;
         let mut result = Vec::new();
-        for i in 0..self.size() {
-            let flattened_matrix = flatten_matrix(self.matrices[i].view());
-            let tensor = vector_to_tensor(flattened_matrix);
-            result.push(tensor);
+        for matrix in matrices.drain(..) {
+            let mut flattened_matrix = matrix.into_raw_vec();
+            result.append(&mut flattened_matrix);
         }
         result
     }
-
-    pub fn size(&self) -> usize {
-        self.matrices.len()
+    pub fn len(&self) -> usize {
+        let MatrixSet(matrices) = &self;
+        matrices.len()
     }
-
     pub fn get(&self, index : usize) -> ArrayView2<f32> {
-        self.matrices[index].view()
+        let MatrixSet(matrices) = &self;
+        matrices[index].view()
     }
 
     pub fn get_newest_matrix(&self) -> ArrayView2<f32> {
-        self.matrices[self.size() - 1].view()
+        let index = self.len() - 1;
+        self.get(index)
     }
 
-    pub fn add_matrix(self, matrix : Array2<f32>) -> MatrixSet {
-        let mut matrices = self.matrices;
+    pub fn add_matrix(self, matrix : Array2<f32>) -> Self {
+        let MatrixSet(mut matrices) = self;
         matrices.push(matrix);
-        MatrixSet {
-            matrices
-        }
+        MatrixSet(matrices)
     }
 }

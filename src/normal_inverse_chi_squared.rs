@@ -1,9 +1,10 @@
 use rand::Rng;
 use rand_core::RngCore;
 use rand_distr::{Distribution, Gamma, Normal};
+use serde::{Serialize, Deserialize};
 use std::fmt;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 pub enum NormalInverseChiSquared {
     ///mean observations of zero, variance of -1
     Uninformative,
@@ -11,7 +12,7 @@ pub enum NormalInverseChiSquared {
     Certain(f64)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct NonDegenerateNormalInverseChiSquared {
     pub mean : f64,
     pub mean_observations : usize,

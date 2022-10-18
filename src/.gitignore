@@ -3,3 +3,4 @@
 *.bin
 *.torch
 *.tensor
+game_data/

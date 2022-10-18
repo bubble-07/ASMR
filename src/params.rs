@@ -113,10 +113,7 @@ impl Params {
             let matrix = self.generate_random_matrix(rng);
             matrices.push(matrix);
         }
-
-        MatrixSet {
-            matrices
-        }
+        MatrixSet(matrices)
     }
 
     fn generate_target_matrix<R : Rng + ?Sized>(matrix_set : &MatrixSet, 

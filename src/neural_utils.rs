@@ -3,8 +3,84 @@ use tch::{nn, kind::Kind, nn::Init, nn::Module, Tensor,
 use std::borrow::Borrow;
 use crate::params::*;
 
-pub trait KModule : std::fmt::Debug + Send {
-    fn forward(&self, xs : &[Tensor]) -> Vec<Tensor>;
+#[derive(Debug)]
+pub struct PeelLayerState {
+    ///Values for look-ups via attentional layers -- N x K x F
+    pub values : Tensor,
+    ///Attention interaction value -> element linear transforms. One tensor of size N x F x K
+    pub interactions : Tensor
+}
+
+impl PeelLayerState {
+    fn push_track(&self, peel_track_state : &PeelTrackState) -> PeelLayerState {
+        let values = Tensor::concat(&[&self.values, &peel_track_state.value], 1);
+        let interactions = Tensor::concat(&[&self.interactions, &peel_track_state.interaction], 2);
+        PeelLayerState {
+            values,
+            interactions
+        }
+    }
+}
+
+//State for a single track in a peel layer
+#[derive(Debug)]
+pub struct PeelTrackState {
+    ///Value for look-up via subsequent attentional layers -- N x F
+    pub value : Tensor,
+    ///Attention interaction value -> value weight scalar transform -- N x F
+    pub interaction : Tensor
+}
+
+#[derive(Debug)]
+pub struct PeelStack {
+    pub layers : Vec<PeelLayer>
+}
+
+impl PeelStack {
+    //Given a stack of per-layer [pre-] activations, yields the peeling states
+    //layer-by-layer
+    pub fn forward_to_peel_state(&self, layer_activations : &[Tensor]) -> Vec<PeelLayerState> {
+        let mut result = Vec::new();
+        for i in 0..self.layers.len() {
+            let layer = &self.layers[i];
+            let pre_activation = &layer_activations[i];
+            let peeling_state = layer.forward_to_peel_state(pre_activation);
+            result.push(peeling_state);
+        }
+        result
+    }
+    //Given current per-layer peel layer states, and the pre-activation for a new
+    //"peel" track, yields the updated peel layer states incorporating the new track
+    //and the final activation map out of the peel
+    pub fn peel_forward(&self, peel_layer_states : &[PeelLayerState], x : &Tensor) -> (Vec<PeelLayerState>, Tensor) {
+        let mut updated_peeling_states = Vec::new();
+        let mut activation = x.shallow_clone();
+        for i in 0..self.layers.len() {
+            let layer = &self.layers[i];
+            let peeling_state = &peel_layer_states[i];
+            let (peeling_track, post_activation) = layer.peel_forward(peeling_state, &activation);
+            activation = post_activation;
+            let updated_peeling_state = peeling_state.push_track(&peeling_track);
+            updated_peeling_states.push(updated_peeling_state);
+        }
+        (updated_peeling_states, activation)
+    }
+}
+
+pub fn peel_stack<'a, T : Borrow<Path<'a>>>(network_path : T, num_layers : usize, full_dimension : usize)
+                 -> PeelStack {
+
+    let network_path = network_path.borrow();  
+
+    let mut layers = Vec::new();
+    for i in 0..num_layers {
+        let layer_path = network_path / format!("layer{}", i);
+        let layer = peel_layer(layer_path, full_dimension);
+        layers.push(layer);
+    }
+    PeelStack {
+        layers
+    }
 }
 
 #[derive(Debug)]
@@ -29,17 +105,66 @@ pub fn residual_attention_stack_with_global_track<'a, T : Borrow<Path<'a>>>(netw
     }
 }
 
-impl KModule for ResidualAttentionStackWithGlobalTrack {
-    fn forward(&self, xs : &[Tensor]) -> Vec<Tensor> {
+impl ResidualAttentionStackWithGlobalTrack {
+    //N x K x F for input xs
+    //Output is input activations indexed by layer, with an
+    //additional last tensor for the output activation
+    pub fn forward(&self, xs : &Tensor) -> Vec<Tensor> {
         let mut result = Vec::new();
-        for x in xs.iter() {
-            let x_clone = x.shallow_clone();
-            result.push(x_clone)
-        }
+        let mut activation = xs.shallow_clone();
+        result.push(activation.shallow_clone());
+
         for layer in self.layers.iter() {
-            result = layer.forward(&result);
+            activation = layer.forward(&activation);
+            result.push(activation.shallow_clone());
         }
+
         result
+    }
+}
+
+#[derive(Debug)]
+pub struct PeelLayer {
+    pub read_only_attention : BilinearSelfAttention,
+    pub pre_linear : nn::Linear,
+    pub post_linear : nn::Linear
+}
+
+impl PeelLayer {
+    pub fn forward_to_peel_state(&self, xs_forward : &Tensor) -> PeelLayerState {
+        self.read_only_attention.forward_to_peel_state(xs_forward)
+    }
+
+    pub fn peel_forward(&self, peel_layer_state : &PeelLayerState, x : &Tensor) -> (PeelTrackState, Tensor) {
+        let (peel_track_state, after_attention) = self.read_only_attention.peel_forward(peel_layer_state, x);
+        let after_linear = self.pre_linear.forward(&x);
+        let sum = &after_linear + &after_attention;
+        let post_activation = sum.leaky_relu();
+        let output = self.post_linear.forward(&post_activation) + x;
+        (peel_track_state, output)
+    }
+}
+
+pub fn peel_layer<'a, T : Borrow<Path<'a>>>(network_path : T, full_dimension : usize) -> PeelLayer {
+    let network_path = network_path.borrow();
+    let read_only_attention = bilinear_self_attention(network_path / "read_only_attention", full_dimension);
+
+    let pre_linear = nn::linear(network_path / "pre_linear", full_dimension as i64, full_dimension as i64,
+                                Default::default());
+
+    //These are initialized to zero in the style of normalization-free ResNets
+    let post_linear_config = LinearConfig {
+        ws_init : Init::Const(0.0),
+        bs_init : Option::Some(Init::Const(0.0)),
+        bias : true
+    };
+
+    let post_linear = nn::linear(network_path / "post_linear", full_dimension as i64, full_dimension as i64,
+                                 post_linear_config);
+    PeelLayer {
+        read_only_attention,
+        pre_linear,
+        post_linear
     }
 }
 
@@ -63,15 +188,29 @@ pub struct ResidualAttentionLayerWithGlobalTrack {
 }
 
 
-impl KModule for ResidualAttentionLayerWithGlobalTrack {
-    fn forward(&self, xs : &[Tensor]) -> Vec<Tensor> {
+impl ResidualAttentionLayerWithGlobalTrack {
+    pub fn forward(&self, xs_forward : &Tensor) -> Tensor {
+        let peel_layer_state = self.forward_to_peel_state(xs_forward);
+        self.forward_from_peel_state(xs_forward, &peel_layer_state)
+    }
+
+    //xs : N x K x F
+    pub fn forward_to_peel_state(&self, xs_forward : &Tensor) -> PeelLayerState {
+        self.bilinear_self_attention.forward_to_peel_state(xs_forward)
+    }
+
+    //xs : N x K x F
+    pub fn forward_from_peel_state(&self, xs_forward : &Tensor, peel_layer_state : &PeelLayerState) -> Tensor {
+        let xs = xs_forward.unbind(1);
         let mut general_inputs = Vec::new();
         for i in 0..(xs.len() - 1) {
             general_inputs.push(xs[i].shallow_clone());
         }
         let global_input = xs[xs.len() - 1].shallow_clone();
 
-        let mut after_attention_general = self.bilinear_self_attention.forward(xs);
+        let after_attention = self.bilinear_self_attention.forward_from_peel_state(xs_forward, peel_layer_state);
+
+        let mut after_attention_general = after_attention.unbind(1);
         let after_attention_global = after_attention_general.pop().unwrap();
 
         let mut result = Vec::new();
@@ -89,7 +228,9 @@ impl KModule for ResidualAttentionLayerWithGlobalTrack {
         let output_global = self.post_linear_global.forward(&post_activation_global) + &global_input;
         result.push(output_global);
 
-        result
+        let result_tensor = Tensor::stack(&result, 1);
+
+        result_tensor
     }
 }
 
@@ -121,134 +262,6 @@ pub fn residual_attention_layer_with_global_track<'a, T : Borrow<Path<'a>>>(netw
         pre_linear_global,
         post_linear_general,
         post_linear_global
-    }
-}
-
-pub trait TriModule : std::fmt::Debug + Send {
-    fn forward(&self, xs : &Tensor, ys : &Tensor, zs : &Tensor) -> Tensor;
-}
-
-#[derive(Debug)]
-pub struct TriConcat { }
-
-#[derive(Debug)]
-pub struct TriConcatThenSequential {
-    trimod : TriConcat,
-    seq : Sequential
-}
-
-impl TriModule for TriConcat {
-    fn forward(&self, xs : &Tensor, ys : &Tensor, zs : &Tensor) -> Tensor {
-        let concatted = Tensor::concat(&[xs, ys, zs], 1i64);
-        concatted
-    }
-}
-
-impl TriModule for TriConcatThenSequential {
-    fn forward(&self, xs : &Tensor, ys : &Tensor, zs : &Tensor) -> Tensor {
-        let init = self.trimod.forward(xs, ys, zs);
-        let rest = self.seq.forward(&init);
-        rest
-    }
-}
-
-impl TriConcatThenSequential {
-    pub fn add<M : Module + 'static>(self, layer : M) -> Self {
-        let sequential = self.seq.add(layer);
-        TriConcatThenSequential {
-            trimod : self.trimod,
-            seq : sequential
-        }
-    }
-    pub fn add_fn<F>(self, f : F) -> Self 
-    where
-        F : 'static + Fn(&Tensor) -> Tensor + Send,
-    {
-        self.add(tch::nn::func(f))
-    }
-}
-
-pub trait BiModule : std::fmt::Debug + Send {
-    fn forward(&self, xs : &Tensor, ys : &Tensor) -> Tensor;
-}
-
-#[derive(Debug)]
-pub struct BiConcat { }
-
-#[derive(Debug)]
-pub struct BiConcatThenSequential { 
-    bimod : BiConcat,
-    seq : Sequential
-}
-
-impl BiModule for BiConcat {
-    fn forward(&self, xs : &Tensor, ys : &Tensor) -> Tensor {
-        let concatted = Tensor::concat(&[xs, ys], 1i64);
-        concatted
-    }
-}
-
-impl BiModule for BiConcatThenSequential {
-    fn forward(&self, xs : &Tensor, ys : &Tensor) -> Tensor {
-        let init = self.bimod.forward(xs, ys);
-        let rest = self.seq.forward(&init);
-        rest
-    }
-}
-
-impl BiConcatThenSequential {
-    pub fn add<M : Module + 'static>(self, layer : M) -> Self {
-        let sequential = self.seq.add(layer);
-        BiConcatThenSequential {
-            bimod : self.bimod,
-            seq : sequential
-        }
-    }
-    pub fn add_fn<F>(self, f : F) -> Self 
-    where
-        F : 'static + Fn(&Tensor) -> Tensor + Send,
-    {
-        self.add(tch::nn::func(f))
-    }
-}
-
-pub fn bi_concat_then_seq() -> BiConcatThenSequential {
-    let bimod = BiConcat { };
-    let seq = nn::seq();
-    BiConcatThenSequential {
-        bimod,
-        seq
-    }
-}
-
-pub fn tri_concat_then_seq() -> TriConcatThenSequential {
-    let trimod = TriConcat { };
-    let seq = nn::seq();
-    TriConcatThenSequential {
-        trimod,
-        seq
-    }
-}
-
-#[derive(Debug)]
-pub struct MappedModule<M : Module> {
-    pub module : M
-}
-
-pub fn map_module<M : Module>(module : M) -> MappedModule<M> {
-    MappedModule {
-        module
-    }
-}
-
-impl <M : Module> KModule for MappedModule<M> {
-    fn forward(&self, xs : &[Tensor]) -> Vec<Tensor> {
-        let mut results = Vec::new();
-        for x in xs.iter() {
-            let result = self.module.forward(x); 
-            results.push(result);
-        }
-        results
     }
 }
 
@@ -296,97 +309,76 @@ pub fn bilinear_self_attention<'a, T : Borrow<Path<'a>>>(network_path : T,
     }
 }
 
-impl KModule for BilinearSelfAttention {
-    fn forward(&self, xs : &[Tensor]) -> Vec<Tensor> {
-        //N x K x F
-        let xs_forward = Tensor::stack(xs, 1);
-        let xs_forward_biased = &xs_forward + &self.left_bias;
+impl BilinearSelfAttention {
+    ///Given the states of all the other peel layers and an x for activation,
+    ///yields the state of x's track after running it through the attentional layer
+    pub fn peel_forward(&self, peel_layer_state : &PeelLayerState, x : &Tensor) -> (PeelTrackState, Tensor) {
+        //N x F
+        let x_forward_biased = x + &self.left_bias;
 
+        //Only really need the forward-biased side to determine softmax
+        //weights for reading, since in "forward" below, for example,
+        //the soft-maxing [and hence, the "reading"] happens on the reverse-biased elements
+        
+        //Determine forward interaction values
+        //N x K
+        let softmax_weights_unnormalized = x_forward_biased.matmul(&peel_layer_state.interactions);
+        //N x K
+        let softmax_weights = softmax_weights_unnormalized.softmax(1, Kind::Float);
+
+        //N x F
+        let activation = softmax_weights.matmul(&peel_layer_state.values);
+
+
+        //Compute value for lookup -- N x F
+        let value = x.matmul(&peel_layer_state.values);
+
+        //The reverse-bias does enter in to updating the new interaction transforms
+        //for the returned peel track state, tho
+        //N x F
+        let x_reverse_biased = x + &self.right_bias;
+        let scaled_interaction_matrix = self.scaling_factor * &self.interaction_matrix;
+        let interaction = scaled_interaction_matrix.matmul(&x_reverse_biased);
+
+        let peel_track_state = PeelTrackState {
+            value,
+            interaction
+        };
+
+        (peel_track_state, activation)
+    }
+
+    //xs : N x K x F
+    //Computes the PeelLayerState from the input tensor
+    pub fn forward_to_peel_state(&self, xs_forward : &Tensor) -> PeelLayerState {
         //N x F x K
-        let xs_reverse_biased = (&xs_forward + &self.right_bias).transpose(1, 2);
+        let xs_reverse_biased = (xs_forward + &self.right_bias).transpose(1, 2);
 
         let scaled_interaction_matrix = self.scaling_factor * &self.interaction_matrix;
 
+        //N x K x F
+        let values = xs_forward.matmul(&self.value_extractor);
+
+        let interactions = scaled_interaction_matrix.matmul(&xs_reverse_biased);
+
+        PeelLayerState {
+            values,
+            interactions
+        }
+    }
+    //Computes the activation from the input tensor and the peel layer state
+    pub fn forward_from_peel_state(&self, xs_forward : &Tensor, peel_layer_state : &PeelLayerState) -> Tensor {
+        //N x K x F
+        let xs_forward_biased = xs_forward + &self.left_bias;
+
         //N x K x K
-        let pre_softmax_weights = xs_forward_biased.matmul(&scaled_interaction_matrix).matmul(&xs_reverse_biased);
+        let pre_softmax_weights = xs_forward_biased.matmul(&peel_layer_state.interactions);
         let softmax_weights = pre_softmax_weights.softmax(2, Kind::Float);
 
         //N x K x F
-        let values = xs_forward.matmul(&self.value_extractor);
-        
-        //N x K x F
-        let output_tensor = softmax_weights.matmul(&values);
+        let activations = softmax_weights.matmul(&peel_layer_state.values);
 
-        let outputs = output_tensor.unbind(1);
-        outputs
+        activations
     }
 }
 
-///A block of layers, all with residual skip-connections
-#[derive(Debug)]
-pub struct ResidualBlock {
-    pub layers : Vec<LinearResidual>
-}
-
-pub fn residual_block<'a, T : Borrow<Path<'a>>>(network_path : T, 
-                      num_layers : usize, dim : usize) -> ResidualBlock {
-    let network_path = network_path.borrow();
-
-    let mut layers = Vec::new();
-    for i in 0..num_layers {
-        let layer_path = network_path / format!("layer{}", i);
-        let layer = linear_residual(layer_path, dim);
-        layers.push(layer);
-    }
-    ResidualBlock {
-        layers
-    }
-}
-
-impl Module for ResidualBlock {
-    fn forward(&self, xs : &Tensor) -> Tensor {
-        let mut result = xs.shallow_clone();
-        for layer in self.layers.iter() {
-            result = layer.forward(&result);
-        }
-        result
-    }
-}
-
-///A single layer with a residual skip-connection
-#[derive(Debug)]
-pub struct LinearResidual {
-    pub first_ws : Tensor,
-    pub second_ws : Tensor,
-    pub first_bs : Tensor,
-    pub second_bs : Tensor
-}
-
-pub fn linear_residual<'a, T : Borrow<Path<'a>>>(network_path : T, 
-                      dim : usize) -> LinearResidual {
-    let network_path = network_path.borrow();
-    let bound = 1.0 / (dim as f64).sqrt();
-
-    let first_bs = network_path.var("first_bias", &[dim as i64], Init::Uniform {lo : -bound, up : bound});
-    let first_ws = network_path.var("first_weights", &[dim as i64, dim as i64], Init::KaimingUniform);
-
-    //Inspired by normalizer-free ResNets, we initialize these to zero
-    let second_bs = network_path.var("second_bias", &[dim as i64], Init::Const(0.0));
-    let second_ws = network_path.var("second_weights", &[dim as i64, dim as i64], Init::Const(0.0));
-
-    LinearResidual {
-        first_ws,
-        second_ws,
-        first_bs,
-        second_bs
-    }
-}
-
-impl Module for LinearResidual {
-    fn forward(&self, xs : &Tensor) -> Tensor {
-        let pre_activation = xs.matmul(&self.first_ws.tr()) + &self.first_bs;
-        let post_activation = pre_activation.leaky_relu();
-        let post_weights = post_activation.matmul(&self.second_ws.tr()) + &self.second_bs;
-        post_weights + xs
-    }
-}

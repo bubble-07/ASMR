@@ -7,6 +7,9 @@ use crate::array_utils::*;
 use crate::params::*;
 use crate::training_examples::*;
 use crate::network_config::*;
+use crate::rollout_states::*;
+use crate::visit_logit_matrices::*;
+use crate::network_module::*;
 use ndarray::*;
 use std::convert::TryFrom;
 
@@ -14,196 +17,137 @@ use rand::Rng;
 use rand::seq::SliceRandom;
 use core::iter::Sum;
 
-///Snapshot state of k^2 rollouts for each matrix product among an initial set of k matrices,
+///Snapshot state of R rollouts for each matrix product among an initial set of k matrices,
 ///where each snapshot takes place at some number of turns after the initial turn
 pub struct NetworkRolloutState {
-    ///1D tensor of size k^2, containing minimal distances along each rollout path
-    pub min_distances : Tensor,
-    ///The results of passing (source, target) matrix pairings through the injector_net
-    ///for each of the k^2 playouts
-    ///Dimension is  (k + t)  x  k^2 x F where "t" is the number of steps since the playout start
-    pub single_embeddings : Vec<Tensor>,
-    ///Flattened target matrix (dims 1 x m * m)
-    pub flattened_target : Tensor,
-    ///The matrices in each set, each of dims MxM, k^2 x (k+t) of 'em
-    ///k^2 x (k + t) x M x M
-    pub matrices : Tensor,
-    ///The remaining number of turns
-    pub remaining_turns : usize
+    ///Non-network-based states of the R rollouts
+    pub rollout_states : RolloutStates,
+
+    ///Ordered per-layer peeling states. L of them, each with N->R, K->(k+t) for
+    ///t the current number of elapsed turns.
+    pub peeling_states : Vec<PeelLayerState>,
+
+    ///Output activation maps for all of the matrices in the network
+    ///(k + t) x R x F
+    pub output_activations : Vec<Tensor>,
+
+    ///Global output activation maps
+    ///R x F
+    pub global_output_activation : Tensor,
+
+    ///Logits for child visit tensors
+    ///R x (k + t) x (k + t)
+    pub child_visit_logits : VisitLogitMatrices,
 }
 
 impl NetworkRolloutState {
     pub fn step(self, network_config : &NetworkConfig) -> Self {
-        //Really just need to update min_distances, single_embeddings, and matrices
-        let _guard = no_grad_guard();
+        let (left_indices, right_indices) = self.child_visit_logits.draw_indices();
         
-        //First, obtain policy matrices from all of the single_embeddings
-        //k^2 x (k + t) x (k + t)
-        let policy = network_config.get_policy(&self.single_embeddings);
-        let k_squared = policy.size()[0];
-        let k_plus_t = policy.size()[1];
-        let m = self.matrices.size()[2];
-        //Flatten the last dimensions of the policy matrices to prepare for sampling
-        let policy_reshaped = policy.reshape(&[k_squared, k_plus_t * k_plus_t]);
-        //Draw index samples from the policy matrix -- 1D shape k^2, 
-        //indices are in (k + t) * (k + t)
-        let sampled_joint_indices = policy_reshaped.multinomial(1, true).reshape(&[k_squared]);
-        let left_indices = sampled_joint_indices.divide_scalar_mode(k_plus_t, "trunc");
-        let right_indices = sampled_joint_indices.fmod(k_plus_t);
+        self.manual_step(network_config, &left_indices, &right_indices)
+    }
 
-        let left_indices = left_indices.reshape(&[k_squared, 1, 1, 1]);
-        let right_indices = right_indices.reshape(&[k_squared, 1, 1, 1]);
+    pub fn manual_step(self, network_config : &NetworkConfig, 
+                       left_indices : &Tensor, right_indices : &Tensor) -> Self {
+        let init_k_plus_t = self.rollout_states.get_num_matrices() as usize;
 
-        let expanded_shape = vec![k_squared, 1, m, m];
+        //First, perform the move
+        let (rollout_states, flattened_added_matrices) = 
+            self.rollout_states.perform_moves(left_indices, right_indices);
 
-        let left_indices = left_indices.expand(&expanded_shape, false);
-        let right_indices = right_indices.expand(&expanded_shape, false);
+        //Now to keep the network state up-to-date
+        
+        //Ensure that we mark the chosen indices as visited in the logit matrix
+        let mut child_visit_logits = self.child_visit_logits;
+        child_visit_logits.mask_chosen(left_indices, right_indices);
+        
+        //Derive the pre-activation for a new peel track
+        let flattened_targets = &rollout_states.flattened_targets;
+        
+        //R x F
+        let added_single_embeddings = network_config.injector_net.forward(&flattened_added_matrices,
+                                                                          flattened_targets);
+        
+        //Update to the new layer activation peeling states by
+        //"peeling forward" through the peel network, also yielding the
+        //final activation out of the peeling track
+        let (peeling_states, added_output_activations) = 
+            network_config.peel_net.peel_forward(&self.peeling_states, &added_single_embeddings);
 
-        //Gets the left/right matrices which were sampled for the next step in rollouts
-        //Dimensions k^2 x M x M
-        let left_matrices = self.matrices.gather(1, &left_indices, false);
-        let right_matrices = self.matrices.gather(1, &right_indices, false);
+        //Expand child visit logit matrices from the newly-added output activations
+        let mut left_logits = Vec::new();
+        let mut right_logits = Vec::new();
+        for other_index in 0..init_k_plus_t {
+            let other_activations = &self.output_activations[other_index];
+            //Other as the left index
+            //Dimension Rx1
+            let left_logit = network_config.policy_extraction_net.forward(other_activations, 
+                                                                           &added_output_activations, 
+                                                                           &self.global_output_activation);
+            //Other as the right index
+            let right_logit = network_config.policy_extraction_net.forward(&added_output_activations,
+                                                                           other_activations,
+                                                                           &self.global_output_activation);
+            left_logits.push(left_logit);
+            right_logits.push(right_logit);
+        }
 
-        let left_matrices = left_matrices.reshape(&[k_squared, m, m]);
-        let right_matrices = right_matrices.reshape(&[k_squared, m, m]);
+        let corner_logit = network_config.policy_extraction_net.forward(&added_output_activations,
+                                                                         &added_output_activations,
+                                                                         &self.global_output_activation);
+        right_logits.push(corner_logit);
 
-        //k^2 x M x M
-        let added_matrices = left_matrices.matmul(&right_matrices);
-        let added_matrices = added_matrices.reshape(&[k_squared, 1, m, m]);
+        //Dimension Rx(k+t_init)
+        let left_logits = Tensor::concat(&left_logits, 1);
+        //Dimension Rx(k+t_init + 1)
+        let right_logits = Tensor::concat(&right_logits, 1);
 
-        //k^2 x (M * M)
-        let flattened_added_matrices = added_matrices.reshape(&[k_squared, m * m]);
+        //Reshape so that we can properly append
+        //Varies across first coordinate, so should be column vectors
+        let left_logits = left_logits.unsqueeze(2);
+        //Varies across second coordinate, so should be row vectors
+        let right_logits = right_logits.unsqueeze(1);
 
-        //k^2 x (M * M)
-        let differences = &self.flattened_target - &flattened_added_matrices;
-        let squared_differences = differences.square();
-        let distances = squared_differences.sum_dim_intlist(&[1], false, Kind::Float);
+        let child_visit_logits = Tensor::concat(&[child_visit_logits.0, left_logits], 2);
+        let child_visit_logits = Tensor::concat(&[child_visit_logits, right_logits], 1);
+        let child_visit_logits = VisitLogitMatrices(child_visit_logits);
+        
+        //Add output activations to our running list
+        let mut output_activations = self.output_activations;
+        output_activations.push(added_output_activations);
 
-        let min_distances = self.min_distances.fmin(&distances);
-
-        let flattened_target_expanded = self.flattened_target.expand_as(&flattened_added_matrices);
-
-
-        //k^2 x F
-        let added_single_embeddings = network_config.injector_net.forward(&flattened_added_matrices, 
-                                                                          &flattened_target_expanded);
-        let mut single_embeddings = self.single_embeddings;
-        single_embeddings.push(added_single_embeddings);
-
-        //k^2 x (k + t + 1) x M x M
-        let matrices = Tensor::concat(&[self.matrices, added_matrices], 1);
-
-        let remaining_turns = self.remaining_turns - 1;
         NetworkRolloutState {
-            remaining_turns,
-            matrices,
-            single_embeddings,
-            min_distances,
-            flattened_target : self.flattened_target
+            rollout_states,
+            peeling_states,
+            output_activations,
+            global_output_activation : self.global_output_activation,
+            child_visit_logits,
         }
     }
 
-    pub fn new(game_state : GameState, network_config : &NetworkConfig) -> NetworkRolloutState {
-        let _guard = no_grad_guard();
+    pub fn from_rollout_states(network_config : &NetworkConfig, rollout_states : RolloutStates)
+        -> NetworkRolloutState {
+        let s = rollout_states.matrices.size();
+        let (r, k_plus_t, m, _) = (s[0], s[1], s[2], s[3]);
+        let flattened_matrix_sets = rollout_states.matrices.reshape(&[r, k_plus_t, m * m]).unbind(1);
 
-        let current_set_size = game_state.matrix_set.size(); 
-        let current_distance = game_state.distance;
-        let target = game_state.get_target();
-        let remaining_turns = game_state.remaining_turns - 1;
+        let single_embeddings = network_config.get_single_embeddings(&flattened_matrix_sets,
+                                                                     &rollout_states.flattened_targets);
+        let (layer_activations, global_output_activation, output_activations) =
+            network_config.get_main_net_outputs(&single_embeddings);
 
-        let mut starting_matrices = Vec::new();
-        let mut starting_flattened_matrices = Vec::new();
-        for i in 0..current_set_size {
-            let matrix = game_state.matrix_set.get(i);
-            let tensor = matrix_to_unbatched_tensor(matrix);
-            starting_matrices.push(tensor);
+        let child_visit_logits = network_config.get_policy_logits(&global_output_activation,
+                                                                  &output_activations);
+        let child_visit_logits = VisitLogitMatrices(child_visit_logits);
 
-            let flat_matrix = flatten_matrix(matrix);
-            let flattened_tensor = vector_to_tensor(flat_matrix);
-            starting_flattened_matrices.push(flattened_tensor);
-        }
-
-        //Dims: 1 x (M * M)
-        let flattened_target = vector_to_tensor(flatten_matrix(target));
-
-        //Dims: 1 x F
-        let mut fat_starting_single_embeddings = network_config.get_single_embeddings(&starting_flattened_matrices, 
-                                                                              &flattened_target);
-        //The starting embeddings above have an extra "1" in their dimensions due to the
-        //fact that we passed a single input to get_single_embeddings -- remove that extra dim
-        let mut starting_single_embeddings = Vec::new();
-        for fat_single_embedding in fat_starting_single_embeddings.drain(..) {
-            let f = fat_single_embedding.size()[1];
-            let single_embedding = fat_single_embedding.reshape(&[f]);
-            starting_single_embeddings.push(single_embedding);
-        }
-
-        let mut min_distances = Vec::new();
-
-        let mut single_embeddings = Vec::new();
-        let mut matrices = Vec::new();
-
-        for i in 0..current_set_size {
-            let left_matrix = game_state.matrix_set.get(i);
-            for j in 0..current_set_size {
-                //TODO: We could do this with less communication overhead and better
-                //GPU utilization by evaluating all pairwise matrix products on the GPU
-                //Of course, to do so, we'll also need to compute distances on-device
-                let right_matrix = game_state.matrix_set.get(j);
-                let added_matrix = left_matrix.dot(&right_matrix);
-                let flattened_matrix = flatten_matrix(added_matrix.view());
-                let flattened_tensor = vector_to_tensor(flattened_matrix);
-                
-                let dist_to_added = sq_frob_dist(added_matrix.view(), game_state.target.view());
-                let child_current_distance = current_distance.min(dist_to_added); 
-                min_distances.push(child_current_distance);
-
-                let mut single_embeddings_row = Vec::new();
-                let mut matrices_row = Vec::new();
-
-                //First, append the information from the starting sets, but as shallow clones
-                for k in 0..current_set_size {
-                    let matrix = starting_matrices[k].shallow_clone();
-                    let single_embedding = starting_single_embeddings[k].shallow_clone();
-
-                    matrices_row.push(matrix);
-                    single_embeddings_row.push(single_embedding);
-                }
-                //Then, append the new matrix and the new embedding for the set
-                matrices_row.push(matrix_to_unbatched_tensor(added_matrix.view()));
-                let matrices_row = Tensor::stack(&matrices_row, 0);
-
-                let added_embedding = network_config.injector_net.forward(&flattened_tensor, &flattened_target); 
-
-                //Need to flatten the added embedding because batch size was just one
-                let f = added_embedding.size()[1];
-                let added_embedding = added_embedding.reshape(&[f]);
-
-                single_embeddings_row.push(added_embedding);
-
-                //(k + 1) x F
-                let single_embeddings_row = Tensor::stack(&single_embeddings_row, 0);
-
-                single_embeddings.push(single_embeddings_row);
-                matrices.push(matrices_row);
-            }
-        }
-        //k^2 x (k + t) x M x M
-        let matrices = Tensor::stack(&matrices, 0);
-
-        //(k + 1) x k^2 x F
-        let single_embeddings = Tensor::stack(&single_embeddings, 1);
-        //(k + 1)  x  k^2 x F
-        let single_embeddings = single_embeddings.unbind(0);
-
-        let min_distances = Tensor::try_from(&min_distances).unwrap();
+        let peeling_states = network_config.peel_net.forward_to_peel_state(&layer_activations);
 
         NetworkRolloutState {
-            single_embeddings,
-            matrices,
-            remaining_turns,
-            min_distances,
-            flattened_target
+            rollout_states,
+            peeling_states,
+            output_activations,
+            global_output_activation,
+            child_visit_logits,
         }
     }
 }

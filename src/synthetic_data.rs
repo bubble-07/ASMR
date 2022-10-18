@@ -2,7 +2,6 @@ use ndarray::*;
 use std::collections::HashSet;
 use std::collections::HashMap;
 use crate::matrix_set::*;
-use crate::game_data::*;
 use crate::array_utils::*;
 use rand::Rng;
 use rand::seq::SliceRandom;
@@ -14,10 +13,36 @@ pub struct GamePathNode {
     pub indegree : usize
 }
 
+pub struct AnnotatedGamePathNode {
+    pub left_index : usize,
+    pub right_index : usize,
+    pub child_visit_probabilities : Array2<f32>,
+    pub added_matrix : Array2<f32>
+}
+
 pub struct GamePath {
     pub matrix_set : MatrixSet,
     pub nodes : Vec<GamePathNode>
 }
+
+pub struct AnnotatedGamePath {
+    pub matrix_set : MatrixSet,
+    pub target_matrix : Array2<f32>,
+    pub nodes : Vec<AnnotatedGamePathNode>
+}
+
+impl GamePathNode {
+    pub fn annotate(self, child_visit_probabilities : Array2<f32>,
+                               added_matrix : Array2<f32>) -> AnnotatedGamePathNode {
+        AnnotatedGamePathNode {
+            left_index : self.left_index,
+            right_index : self.right_index,
+            child_visit_probabilities,
+            added_matrix
+        }
+    }
+}
+
 
 impl GamePath {
     pub fn new(matrix_set : MatrixSet) -> GamePath {
@@ -27,23 +52,38 @@ impl GamePath {
         }
     }
 
-    pub fn get_game_data(&self) -> GameData {
-        let added_matrices = self.get_added_matrices();
-        let mut successors_per_node : Vec<HashSet<usize>> = self.get_potential_successors_by_added_node();
+    pub fn annotate_path(mut self) -> AnnotatedGamePath {
+        let MatrixSet(added_matrices) = self.get_added_matrices();
+        //Lop off the beginning, we don't care
+        let mut added_matrices = added_matrices[self.get_initial_set_size()..].to_vec();
+
+        let mut child_visit_probabilities_by_added_node = self.get_child_visit_probabilities_by_added_node();
+        let mut annotated_nodes = Vec::new();
         
-        let mut flattened_matrix_sets = Vec::new();
-        let mut child_visit_probabilities = Vec::new();
+        for ((node, child_visit_probabilities), added_matrix) in self.nodes.drain(..)
+                                                 .zip(child_visit_probabilities_by_added_node.drain(..))
+                                                 .zip(added_matrices.drain(..)) {
+            let annotated_node = node.annotate(child_visit_probabilities, added_matrix);
+            annotated_nodes.push(annotated_node);
+        }
+        let target_matrix = annotated_nodes[annotated_nodes.len() - 1].added_matrix.clone();
+
+        AnnotatedGamePath {
+            matrix_set : self.matrix_set,
+            target_matrix,
+            nodes : annotated_nodes
+        }
+    }
+
+    pub fn get_child_visit_probabilities_by_added_node(&self) -> Vec<Array2<f32>> {
+        let mut successors_per_node : Vec<HashSet<usize>> = self.get_potential_successors_by_added_node();
+        let initial_set_size = self.get_initial_set_size();
+        let mut result = Vec::new();
 
         for (mut successor_index_set, current_node_index) in successors_per_node.drain(..)
                                                              .zip(0..self.nodes.len()) {
-            let current_index = self.matrix_set.size() + current_node_index;
-            let mut flattened_matrices = Vec::new();
-            for index in 0..current_index {
-                let flattened_matrix = flatten_matrix(added_matrices.get(index)).to_owned();
-                flattened_matrices.push(flattened_matrix);
-            }
-
-            let mut child_visit_probability_mat = Array::zeros((flattened_matrices.len(), flattened_matrices.len()));
+            let k_plus_t = initial_set_size + current_node_index;
+            let mut child_visit_probability_mat = Array::zeros((k_plus_t, k_plus_t));
             let increment : f32 = 1.0f32 / (successor_index_set.len() as f32);
             for index in successor_index_set.drain() {
                 let node_index = self.to_node_index(index);
@@ -52,18 +92,9 @@ impl GamePath {
                 let right_index = node.right_index;
                 child_visit_probability_mat[[left_index, right_index]] += increment;
             }
-
-            flattened_matrix_sets.push(flattened_matrices);
-            child_visit_probabilities.push(child_visit_probability_mat);
+            result.push(child_visit_probability_mat);
         }
-
-        let flattened_matrix_target = flatten_matrix(added_matrices.get_newest_matrix()).to_owned();
-    
-        GameData {
-            flattened_matrix_sets,
-            flattened_matrix_target,
-            child_visit_probabilities
-        }
+        result
     }
 
     //Returned mapping is from actual node index added to the entire set of possible nodes
@@ -73,13 +104,14 @@ impl GamePath {
 
         let reverse_links = self.get_reverse_links();
 
-        for current_index in self.matrix_set.size()..(self.matrix_set.size() + self.nodes.len()) {
+        let init_set_size = self.get_initial_set_size();
+        for current_index in init_set_size..(init_set_size + self.nodes.len()) {
             let mut potential_successors = HashSet::new();
             for contained_index in 0..current_index {
                 let next_indices = &reverse_links[contained_index];
                 for next_index in next_indices.iter() {
                     if (*next_index >= current_index) {
-                        let next_node_index = *next_index - self.matrix_set.size(); 
+                        let next_node_index = *next_index - init_set_size;
                         let next_node = &self.nodes[next_node_index];
                         if (next_node.left_index < current_index &&
                             next_node.right_index < current_index) {
@@ -96,12 +128,13 @@ impl GamePath {
     fn get_reverse_links(&self) -> Vec<HashSet<usize>> {
         let mut reverse_links = Vec::new();
         //Add reverse links for original set -> nodes
-        for i in 0..self.matrix_set.size() {
+        let init_set_size = self.get_initial_set_size();
+        for i in 0..init_set_size {
             let mut reverse_links_for_current = HashSet::new();
             for j in 0..self.nodes.len() {
                 let node = &self.nodes[j];
                 if (node.left_index == i || node.right_index == i) {
-                    let current_index = self.matrix_set.size() + j;
+                    let current_index = init_set_size + j;
                     reverse_links_for_current.insert(current_index);
                 }
             }
@@ -109,12 +142,12 @@ impl GamePath {
         }
         //Add reverse links for nodes -> nodes
         for i in 0..self.nodes.len() {
-            let origin_index = self.matrix_set.size() + i;
+            let origin_index = init_set_size + i;
             let mut reverse_links_for_current = HashSet::new();
             for j in i..self.nodes.len() {
                 let node = &self.nodes[j];
                 if (node.left_index == origin_index || node.right_index == origin_index) {
-                    let current_index = self.matrix_set.size() + j;
+                    let current_index = init_set_size + j;
                     reverse_links_for_current.insert(current_index);
                 }
             }
@@ -129,10 +162,12 @@ impl GamePath {
         let mut indegree_zero_indices = Vec::new();
         let mut removed_indices = HashSet::new();
 
+        let init_set_size = self.get_initial_set_size();
+
         //First, add all nodes [ignoring the very last one] which have indegree zero
         for i in 0..(self.nodes.len() - 1) {
             if (self.nodes[i].indegree == 0) {
-                let index = i + self.matrix_set.size();
+                let index = init_set_size + i;
                 indegree_zero_indices.push(index);
             }
         }
@@ -170,7 +205,7 @@ impl GamePath {
 
             let mut removed_elements_so_far = 0;
             for i in 0..self.nodes.len() {
-                let orig_index = i + self.matrix_set.size();
+                let orig_index = init_set_size + i;
                 if (removed_indices.contains(&orig_index)) {
                     removed_elements_so_far += 1;
                 } else {
@@ -210,16 +245,21 @@ impl GamePath {
         added_matrices.get_newest_matrix().to_owned()
     }
 
+    pub fn get_initial_set_size(&self) -> usize {
+        let MatrixSet(matrices) = &self.matrix_set;
+        matrices.len()
+    }
+
     pub fn get_size(&self) -> usize {
-        self.matrix_set.size() + self.nodes.len()
+        self.get_initial_set_size() + self.nodes.len()
     }
 
     fn is_node_index(&self, index : usize) -> bool {
-        index >= self.matrix_set.size()
+        index >= self.get_initial_set_size()
     }
 
     fn to_node_index(&self, index : usize) -> usize {
-        index - self.matrix_set.size()
+        index - self.get_initial_set_size()
     }
 
     pub fn add_node(&mut self, left_index : usize, right_index : usize) {

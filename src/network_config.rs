@@ -5,7 +5,11 @@ use crate::neural_utils::*;
 use crate::game_state::*;
 use crate::array_utils::*;
 use crate::params::*;
+use crate::batch_split_training_examples::*;
 use crate::training_examples::*;
+use crate::network_module::*;
+use crate::network_rollout::*;
+use crate::rollout_states::*;
 use ndarray::*;
 
 use rand::Rng;
@@ -19,8 +23,10 @@ use core::iter::Sum;
 pub struct NetworkConfig {
     ///Injection network, taking matrix, target pairs, and turning them into initial features -- M x M -> F
     pub injector_net : BiConcatThenSequential,
-    ///Main network - a stack of attentional residual layers interspersed with RELU. K x F -> (K + 1) x F
-    pub main_net : ResidualAttentionStackWithGlobalTrack,
+    ///Root network - a stack of attentional residual layers interspersed with RELU. K x F -> (K + 1) x F
+    pub root_net : ResidualAttentionStackWithGlobalTrack,
+    ///Peel network
+    pub peel_net : PeelStack,
     ///Policy extraction network, taking "left", "right", 
     ///and "global" feature maps -- F x F x F -> F
     pub policy_extraction_net : TriConcatThenSequential
@@ -29,28 +35,33 @@ pub struct NetworkConfig {
 impl NetworkConfig {
     pub fn new(params : &Params, vs : &nn::Path) -> NetworkConfig {
         let injector_net = injector_net(params, vs / "injector");
-        let main_net = main_net(params, vs / "main");
+        let root_net = root_net(params, vs / "root");
+        let peel_net = peel_net(params, vs / "peel");
         let policy_extraction_net = policy_extraction_net(params, vs / "policy_extractor");
         NetworkConfig {
             injector_net,
-            main_net,
+            root_net,
+            peel_net,
             policy_extraction_net
         }
     }
 
-    pub fn get_single_embeddings(&self, flattened_matrix_set : &[Tensor], flattened_matrix_target : &Tensor)
-                            -> Vec<Tensor> {
-        let k = flattened_matrix_set.len();
-        let mut single_embeddings = Vec::new();
-        for i in 0..k {
-            let flattened_matrix = &flattened_matrix_set[i];
-            let embedding = self.injector_net.forward(flattened_matrix, flattened_matrix_target);
-            single_embeddings.push(embedding);
-        }
-        single_embeddings
+    pub fn get_single_embedding(&self, flattened_matrices : &Tensor, flattened_matrix_targets : &Tensor)
+                            -> Tensor {
+        self.injector_net.forward(flattened_matrices, flattened_matrix_targets)
     }
 
-    fn get_unnormalized_policy(&self, single_embeddings : &[Tensor]) -> Tensor {
+    pub fn get_single_embeddings(&self, flattened_matrix_sets : &[Tensor], flattened_matrix_targets : &Tensor)
+                            -> Vec<Tensor> {
+        flattened_matrix_sets.iter()
+            .map(|x| self.get_single_embedding(x, flattened_matrix_targets))
+            .collect()
+    }
+
+    ///Returns: pre-activations for each layer, 
+    ///followed by the global output embedding and output embeddings for each matrix
+    ///in the initial matrix set
+    pub fn get_main_net_outputs(&self, single_embeddings : &[Tensor]) -> (Vec<Tensor>, Tensor, Vec<Tensor>) {
         let k = single_embeddings.len();
 
         let mut averaged_embedding = Iterator::sum(single_embeddings.iter());
@@ -62,12 +73,22 @@ impl NetworkConfig {
         }
         main_net_inputs.push(averaged_embedding);
 
-        let main_net_inputs = main_net_inputs;
+        let main_net_inputs = Tensor::stack(&main_net_inputs, 0);
 
-        let mut main_net_outputs = self.main_net.forward(&main_net_inputs); 
+        //L x (K+1) x NxF, global output in the last place
+        let mut main_activations = self.root_net.forward(&main_net_inputs); 
+
+        let main_net_outputs = main_activations.pop().unwrap();
+        let mut main_net_outputs = main_net_outputs.unbind(0);
+
         let main_net_global_output = main_net_outputs.pop().unwrap();
-        //K x NxF
-        let main_net_individual_outputs = main_net_outputs;
+
+        (main_activations, main_net_global_output, main_net_outputs)
+    }
+
+    pub fn get_policy_logits(&self, main_net_global_output : &Tensor,
+                             main_net_individual_outputs : &[Tensor]) -> Tensor {
+        let k = main_net_individual_outputs.len();
         
         let mut policy_tensors_by_left = Vec::new();
         //Compute policy logits for all left and right vectors
@@ -87,128 +108,94 @@ impl NetworkConfig {
             policy_tensors_by_left.push(policy_tensor_for_left);
         }
         //NxKxK
-        let unnormalized_policy_mat = Tensor::stack(&policy_tensors_by_left, 1);
-        unnormalized_policy_mat
+        let logit_policy_mat = Tensor::stack(&policy_tensors_by_left, 1);
+        logit_policy_mat
     }
 
-    ///Given a collection of K feature vector stacks from the injector_net, 
-    ///(dimension NxF, N is the number of samples and F is the number of features), yields a computed Policy [Matrix stack
-    ///of dimension NxKxK] tensor.
-    pub fn get_policy(&self, single_embeddings : &[Tensor]) -> Tensor {
-        let k = single_embeddings.len();
-        //NxKxK
-        let unnormalized_policy_mat = self.get_unnormalized_policy(single_embeddings);
+    ///Gets the loss for a given playout-bundle. This is normalized by the number
+    ///of elements in the final probability logit matrices and also by the number
+    ///of training examples contained within the playout bundle
+    pub fn get_loss_for_playout_bundle(&self, playout_bundle : &PlayoutBundle) -> Tensor {
+        let s = playout_bundle.flattened_initial_matrix_sets.size();
+        let (n, k, m) = (s[0], s[1], s[2]);
+        let l = playout_bundle.left_matrix_indices.size()[1];
 
-        let n = unnormalized_policy_mat.size()[0];
+        let k_squared = k * k;
+        let k_plus_l = k + l;
+        let k_plus_l_squared = k_plus_l * k_plus_l;
 
-        let flattened_unnormalized_policy_mat = unnormalized_policy_mat.reshape(&[n, (k * k) as i64]);
-        let flattened_policy_mat =
-                    flattened_unnormalized_policy_mat.softmax(1, Kind::Float);
+        let mut total_loss = Tensor::zeros(&[], (Kind::Float, playout_bundle.flattened_matrix_targets.device()));
 
-        let policy_mat = flattened_policy_mat.reshape(&[n, k as i64, k as i64]);
+        let rollout_states = RolloutStates::from_playout_bundle_initial_state(&playout_bundle);
+        let mut network_rollout_state = NetworkRolloutState::from_rollout_states(&self, rollout_states);
 
-        policy_mat
-    }
+        //First, compute the loss for the base
+        let element_weighting = (1.0f64 / ((k_plus_l_squared * n) as f64)) as f32;
+        //N x k x k
+        let network_visit_logits = &network_rollout_state.child_visit_logits;
+        let actual_visit_probabilities = &playout_bundle.child_visit_probabilities[0];
+        let base_loss = network_visit_logits.get_loss(actual_visit_probabilities);
+        total_loss += element_weighting * base_loss;
+        
+        //Compute loss for each peel in turn
+        for t in 0..(l as usize) {
+            //Dimension: N
+            let left_matrix_indices = playout_bundle.left_matrix_indices.i((.., t as i64));
+            let right_matrix_indices = playout_bundle.right_matrix_indices.i((.., t as i64));
 
-    ///Given a collection of K [flattened] matrix stacks (dimension NxM, N is the
-    ///number of samples and M is the flattened matrix dimension), and a flattened matrix target
-    ///(dimension NxM), yields a computed Policy [Matrix stack of dimension NxKxK] tensor
-    pub fn get_policy_from_scratch(&self, flattened_matrix_set : &[Tensor], flattened_matrix_target : &Tensor,
-                                   as_unnormalized : bool) -> Tensor {
+            //Roll out the network one step
+            network_rollout_state = network_rollout_state.manual_step(&self,
+                                    &left_matrix_indices, &right_matrix_indices);
 
-        //First, compute the embeddings for every (input, target) pair
-        let single_embeddings = self.get_single_embeddings(flattened_matrix_set, flattened_matrix_target);
-
-        //Then compute the policy from those embeddings
-        let policy_mat = if (as_unnormalized) {
-            self.get_unnormalized_policy(&single_embeddings)
-        } else {
-            self.get_policy(&single_embeddings)
-        };
-
-        policy_mat
-    }
-    pub fn get_loss_from_scratch(&self, flattened_matrix_set : &[Tensor], flattened_matrix_target : &Tensor,
-                                 target_policy : &Tensor) -> Tensor {
-        let computed_unnormalized_policy = self.get_policy_from_scratch(flattened_matrix_set, flattened_matrix_target, true);
-        let n = computed_unnormalized_policy.size()[0];
-        let k = computed_unnormalized_policy.size()[1];
-
-        let flattened_unnormalized_policy = computed_unnormalized_policy.reshape(&[n as i64, (k * k) as i64]);
-        let log_softmaxed = flattened_unnormalized_policy.log_softmax(1, Kind::Float);
-
-        let one_over_n = 1.0f32 / (n as f32);
-        let flattened_log_softmaxed = one_over_n * log_softmaxed.reshape(&[(n * k * k) as i64]);
-        let flattened_target_policy = target_policy.reshape(&[(n * k * k) as i64]);
-        let inner_product = flattened_target_policy.dot(&flattened_log_softmaxed);
-
-        -inner_product
+            let network_visit_logits = &network_rollout_state.child_visit_logits;
+            let actual_visit_probabilities = &playout_bundle.child_visit_probabilities[t + 1];
+            let peel_loss = network_visit_logits.get_peel_loss(actual_visit_probabilities);
+            total_loss += element_weighting * peel_loss;
+        }
+        total_loss
     }
 
     pub fn run_training_epoch<R : Rng + ?Sized>(&self, params : &Params, 
-                              training_examples : &TrainingExamples, 
+                              training_examples : &BatchSplitTrainingExamples, 
                               opt : &mut Optimizer,
                               device : Device,
                               rng : &mut R) -> (f64, f64) { //return value is training loss, validation loss
+
         let mut total_train_loss = 0f64;
-
-        let set_sizings = training_examples.get_set_sizings();
-        let validation_loss_weightings = training_examples.get_validation_loss_weightings(params, &set_sizings);
-        let training_loss_weightings = training_examples.get_training_loss_weightings(params, &set_sizings);
-
         let num_iters = params.train_batches_per_save;
 
-        //First train
+        //First, train
         for _ in 0..num_iters {
-            let mut iter_comparison = 0f64;
-            let mut iter_loss = Tensor::scalar_tensor(0f64, (Kind::Float, device));
-            for (set_sizing, loss_weighting) in set_sizings.iter().zip(training_loss_weightings.iter()) {
-                let total_training_batches = training_examples.get_total_number_of_training_batches(params, *set_sizing);
-                if (total_training_batches == 0) {
-                    continue; //Sux to sux
-                }
-                let batch_index = rng.gen_range(0..total_training_batches);
-                let batch_index = BatchIndex {
-                    set_sizing : *set_sizing,
-                    batch_index
-                };
+            let mut iter_loss = 0f64;
 
-                let mut normalized_loss = batch_index.get_normalized_loss(params, training_examples, &self, device);
-                normalized_loss *= *loss_weighting;
-                iter_loss += normalized_loss;
+            opt.zero_grad();
 
-                let mut normalized_loss_comparison = training_examples.get_normalized_random_choice_loss(*set_sizing);
-                normalized_loss_comparison *= *loss_weighting as f64;
-                iter_comparison += normalized_loss_comparison;
+            for (weight, playout_bundle) in training_examples.iter_training_batches(rng, device) {
+                let loss = self.get_loss_for_playout_bundle(&playout_bundle);
+                let weighted_loss = weight * loss;
+
+                //Backprop the losses from just this one bundle element.
+                //We'll use this to accumulate gradients for the optimizer to step later
+                weighted_loss.backward();
+
+                //Accumulate to determine the overall iteration loss
+                iter_loss += f64::from(&weighted_loss)
             }
+            println!("Iter loss: {}", iter_loss);
 
-            let float_iter_loss = f64::from(&iter_loss);
-            println!("Iter loss: {}, Random choice loss: {}", float_iter_loss, iter_comparison);
-
-            opt.backward_step(&iter_loss);
-            total_train_loss += float_iter_loss / (num_iters as f64);
+            //Update model parameters based on gradients
+            opt.step();
+            total_train_loss += iter_loss / (num_iters as f64);
         }
-        //Now compute validation loss
+
+        //Then, obtain validation loss
         let _guard = no_grad_guard();
         let mut validation_loss = 0f64;
-        for relative_unwrapped_batch_index in 0..params.held_out_validation_batches {
-            for (set_sizing, loss_weighting) in set_sizings.iter().zip(validation_loss_weightings.iter()) {
-                let min_batch_index = training_examples.get_total_number_of_training_batches(params, *set_sizing);
-                let num_validation_batches = training_examples.get_total_number_of_validation_batches(params, *set_sizing);
-                let batch_index = min_batch_index + (relative_unwrapped_batch_index % num_validation_batches);
-                let batch_index = BatchIndex {
-                    set_sizing : *set_sizing,
-                    batch_index
-                };
-                
-                let mut normalized_loss = batch_index.get_normalized_loss(params, training_examples, &self, device);
-                normalized_loss *= *loss_weighting;
-                
-                validation_loss += f64::from(&normalized_loss);
-            }
+        for (weight, playout_bundle) in training_examples.iter_validation_batches(device) {
+            let loss = self.get_loss_for_playout_bundle(&playout_bundle);
+            let weighted_loss = weight * loss;
+            validation_loss += f64::from(&weighted_loss);
         }
-        validation_loss /= params.held_out_validation_batches as f64;
-
         (total_train_loss, validation_loss)
     }
 }
