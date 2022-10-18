@@ -426,7 +426,7 @@ fn gen_synthetic_training_data_file_command(params : &Params, training_data_outp
 }
 
 fn distill_game_data_command(params : Params, game_data_root : &str, training_data_output_path : &str) {
-    //TODO: reimplement me plz.
+    //TODO: reimplement me!
     panic!();
 }
 
