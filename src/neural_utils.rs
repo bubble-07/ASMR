@@ -13,8 +13,11 @@ pub struct PeelLayerState {
 
 impl PeelLayerState {
     fn push_track(&self, peel_track_state : &PeelTrackState) -> PeelLayerState {
-        let values = Tensor::concat(&[&self.values, &peel_track_state.value], 1);
-        let interactions = Tensor::concat(&[&self.interactions, &peel_track_state.interaction], 2);
+        let value = peel_track_state.value.unsqueeze(1);
+        let interaction = peel_track_state.interaction.unsqueeze(2);
+
+        let values = Tensor::concat(&[&self.values, &value], 1);
+        let interactions = Tensor::concat(&[&self.interactions, &interaction], 2);
         PeelLayerState {
             values,
             interactions
@@ -314,31 +317,41 @@ impl BilinearSelfAttention {
     ///yields the state of x's track after running it through the attentional layer
     pub fn peel_forward(&self, peel_layer_state : &PeelLayerState, x : &Tensor) -> (PeelTrackState, Tensor) {
         //N x F
-        let x_forward_biased = x + &self.left_bias;
+        let x_left_biased = x + &self.left_bias;
+        //N x 1 x F
+        let x_left_biased = x_left_biased.unsqueeze(1);
 
         //Only really need the forward-biased side to determine softmax
         //weights for reading, since in "forward" below, for example,
         //the soft-maxing [and hence, the "reading"] happens on the reverse-biased elements
         
+        //interactions is N x F x K
+        
         //Determine forward interaction values
-        //N x K
-        let softmax_weights_unnormalized = x_forward_biased.matmul(&peel_layer_state.interactions);
-        //N x K
-        let softmax_weights = softmax_weights_unnormalized.softmax(1, Kind::Float);
+        //N x 1 x K
+        let softmax_weights_unnormalized = x_left_biased.matmul(&peel_layer_state.interactions);
+        //N x 1 x K
+        let softmax_weights = softmax_weights_unnormalized.softmax(2, Kind::Float);
 
-        //N x F
+        //N x 1 x F
         let activation = softmax_weights.matmul(&peel_layer_state.values);
+        //N x F
+        let activation = activation.squeeze_dim(1);
 
 
-        //Compute value for lookup -- N x F
-        let value = x.matmul(&peel_layer_state.values);
+        //Compute value for lookup from later peels -- N x F
+        let value = x.matmul(&self.value_extractor);
 
-        //The reverse-bias does enter in to updating the new interaction transforms
+        //The right-bias does enter in to updating the new interaction transforms
         //for the returned peel track state, tho
         //N x F
-        let x_reverse_biased = x + &self.right_bias;
+        let x_right_biased = x + &self.right_bias;
+        //N x F x 1
+        let x_right_biased = x_right_biased.unsqueeze(2);
         let scaled_interaction_matrix = self.scaling_factor * &self.interaction_matrix;
-        let interaction = scaled_interaction_matrix.matmul(&x_reverse_biased);
+
+        //N x F
+        let interaction = scaled_interaction_matrix.matmul(&x_right_biased).squeeze_dim(2);
 
         let peel_track_state = PeelTrackState {
             value,
@@ -350,16 +363,17 @@ impl BilinearSelfAttention {
 
     //xs : N x K x F
     //Computes the PeelLayerState from the input tensor
-    pub fn forward_to_peel_state(&self, xs_forward : &Tensor) -> PeelLayerState {
+    pub fn forward_to_peel_state(&self, xs : &Tensor) -> PeelLayerState {
         //N x F x K
-        let xs_reverse_biased = (xs_forward + &self.right_bias).transpose(1, 2);
+        let xs_right_biased = (xs + &self.right_bias).transpose(1, 2);
 
         let scaled_interaction_matrix = self.scaling_factor * &self.interaction_matrix;
 
         //N x K x F
-        let values = xs_forward.matmul(&self.value_extractor);
+        let values = xs.matmul(&self.value_extractor);
 
-        let interactions = scaled_interaction_matrix.matmul(&xs_reverse_biased);
+        //N x F x K
+        let interactions = scaled_interaction_matrix.matmul(&xs_right_biased);
 
         PeelLayerState {
             values,
@@ -369,10 +383,10 @@ impl BilinearSelfAttention {
     //Computes the activation from the input tensor and the peel layer state
     pub fn forward_from_peel_state(&self, xs_forward : &Tensor, peel_layer_state : &PeelLayerState) -> Tensor {
         //N x K x F
-        let xs_forward_biased = xs_forward + &self.left_bias;
+        let xs_left_biased = xs_forward + &self.left_bias;
 
         //N x K x K
-        let pre_softmax_weights = xs_forward_biased.matmul(&peel_layer_state.interactions);
+        let pre_softmax_weights = xs_left_biased.matmul(&peel_layer_state.interactions);
         let softmax_weights = pre_softmax_weights.softmax(2, Kind::Float);
 
         //N x K x F

@@ -73,14 +73,18 @@ impl NetworkConfig {
         }
         main_net_inputs.push(averaged_embedding);
 
-        let main_net_inputs = Tensor::stack(&main_net_inputs, 0);
+        //Nx(K+1)xF
+        let main_net_inputs = Tensor::stack(&main_net_inputs, 1);
 
-        //L x (K+1) x NxF, global output in the last place
+        //L x Nx(K+1)xF, global output in the last place of each feature map
         let mut main_activations = self.root_net.forward(&main_net_inputs); 
 
+        //Pull out last-layer activations
+        //Nx(K+1)xF
         let main_net_outputs = main_activations.pop().unwrap();
-        let mut main_net_outputs = main_net_outputs.unbind(0);
-
+        //Split into (K+1) NxF feature maps
+        let mut main_net_outputs = main_net_outputs.unbind(1);
+        //Pull out the global output from the collection of outputs
         let main_net_global_output = main_net_outputs.pop().unwrap();
 
         (main_activations, main_net_global_output, main_net_outputs)
@@ -138,7 +142,9 @@ impl NetworkConfig {
         total_loss += element_weighting * base_loss;
         
         //Compute loss for each peel in turn
-        for t in 0..(l as usize) {
+        //Bound is (l-1) since we don't care about the loss at the point
+        //at which we _reach_ the goal.
+        for t in 0..((l-1) as usize) {
             //Dimension: N
             let left_matrix_indices = playout_bundle.left_matrix_indices.i((.., t as i64));
             let right_matrix_indices = playout_bundle.right_matrix_indices.i((.., t as i64));

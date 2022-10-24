@@ -59,10 +59,10 @@ impl PlayoutBundle {
                                   .collect();
         
         let left_matrix_indices = self.left_matrix_indices.i(batch_index_range.clone())
-                                      .to_device(device).detach();
+                                      .to_device(device).to_kind(Kind::Int64).detach();
 
         let right_matrix_indices = self.right_matrix_indices.i(batch_index_range.clone())
-                                      .to_device(device).detach();
+                                      .to_device(device).to_kind(Kind::Int64).detach();
 
         PlayoutBundle {
             flattened_initial_matrix_sets,

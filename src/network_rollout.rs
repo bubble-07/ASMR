@@ -63,7 +63,7 @@ impl NetworkRolloutState {
         
         //Derive the pre-activation for a new peel track
         let flattened_targets = &rollout_states.flattened_targets;
-        
+
         //R x F
         let added_single_embeddings = network_config.injector_net.forward(&flattened_added_matrices,
                                                                           flattened_targets);

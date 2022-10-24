@@ -64,6 +64,8 @@ impl VisitLogitMatrices {
         let all_logits = Tensor::concat(&[last_row_logits, last_col_logits], 1);
         let all_policy = Tensor::concat(&[last_row_policy, last_col_policy], 1);
 
+        let flat_dim = r * 2 * k_plus_t as i64;
+
         //Replace the very last element with probability-sums over the interior
         //matrices not including the last index. For the logits matrix,
         //this will mean using logsumexp instead.
@@ -88,7 +90,11 @@ impl VisitLogitMatrices {
         //With that info, output a loss
         let log_softmaxed = all_logits.log_softmax(1, Kind::Float);
         let one_over_r = 1.0f32 / (r as f32);
-        let inner_product = log_softmaxed.dot(&all_policy);
+
+        let log_softmaxed_flattened = log_softmaxed.reshape(&[flat_dim]);
+        let all_policy_flattened = all_policy.reshape(&[flat_dim]);
+
+        let inner_product = log_softmaxed_flattened.dot(&all_policy_flattened);
         let unnormalized_loss = -one_over_r * inner_product;
 
         let normalization_factor = (((2 * k_plus_t - 1) as f64) / ((2 * k_plus_t) as f64)) as f32;
@@ -146,7 +152,7 @@ impl VisitLogitMatrices {
         let k_plus_t = self.get_matrix_dim();
 
         let row_step = k_plus_t;
-        let batch_step = r * k_plus_t;
+        let batch_step = k_plus_t * k_plus_t;
 
 
         let VisitLogitMatrices(matrices) = self;
@@ -161,9 +167,8 @@ impl VisitLogitMatrices {
         let offsets = batch_offsets + matrix_offsets;
 
 
-        let values = Tensor::zeros(&[r], (Kind::Float, matrices.device()));
-        let values = values.fill(f64::NEG_INFINITY);
-
+        let mut values = Tensor::zeros(&[r], (Kind::Float, matrices.device()));
+        let values = values.fill_(f64::NEG_INFINITY);
 
         let result = matrices.put(&offsets, &values, false);
 

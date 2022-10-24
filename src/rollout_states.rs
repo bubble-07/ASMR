@@ -156,9 +156,9 @@ impl RolloutStates {
     }
     //Expands a single-rollout "RolloutStates" to have R identical rollout states
     pub fn expand(self, R : usize) -> Self {
-        let matrices = self.matrices.expand_copy(&[R as i64, -1, -1, -1], false); 
-        let min_distances = self.min_distances.expand_copy(&[R as i64], false);
-        let flattened_targets = self.flattened_targets.expand_copy(&[R as i64, -1], false);
+        let matrices = self.matrices.expand(&[R as i64, -1, -1, -1], false); 
+        let min_distances = self.min_distances.expand(&[R as i64], false);
+        let flattened_targets = self.flattened_targets.expand(&[R as i64, -1], false);
         RolloutStates {
             min_distances,
             matrices,
