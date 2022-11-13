@@ -1,5 +1,5 @@
 use tch::{no_grad_guard, nn, nn::Init, nn::Module, Tensor, nn::Path, nn::Sequential, kind::Kind,
-          nn::Optimizer, IndexOp, Device};
+          nn::Optimizer, IndexOp, Device, nn::VarStore};
 use crate::network::*;
 use crate::neural_utils::*;
 use crate::game_state::*;
@@ -46,15 +46,17 @@ impl NetworkConfig {
         }
     }
 
-    pub fn get_single_embedding(&self, flattened_matrices : &Tensor, flattened_matrix_targets : &Tensor)
+    pub fn get_single_embedding(&self, flattened_transformed_matrices : &Tensor, 
+                                transformed_flattened_targets : &Tensor)
                             -> Tensor {
-        self.injector_net.forward(flattened_matrices, flattened_matrix_targets)
+        self.injector_net.forward(flattened_transformed_matrices, &transformed_flattened_targets)
     }
 
-    pub fn get_single_embeddings(&self, flattened_matrix_sets : &[Tensor], flattened_matrix_targets : &Tensor)
+    pub fn get_single_embeddings(&self, flattened_transformed_matrix_sets : &[Tensor], 
+                                 transformed_flattened_targets : &Tensor)
                             -> Vec<Tensor> {
-        flattened_matrix_sets.iter()
-            .map(|x| self.get_single_embedding(x, flattened_matrix_targets))
+        flattened_transformed_matrix_sets.iter()
+            .map(|x| self.get_single_embedding(x, transformed_flattened_targets))
             .collect()
     }
 
@@ -64,7 +66,7 @@ impl NetworkConfig {
     pub fn get_main_net_outputs(&self, single_embeddings : &[Tensor]) -> (Vec<Tensor>, Tensor, Vec<Tensor>) {
         let k = single_embeddings.len();
 
-        let mut averaged_embedding = Iterator::sum(single_embeddings.iter());
+        let mut averaged_embedding : Tensor = Iterator::sum(single_embeddings.iter());
         averaged_embedding *= (1.0f32 / (k as f32));
 
         let mut main_net_inputs = Vec::new();
@@ -82,6 +84,7 @@ impl NetworkConfig {
         //Pull out last-layer activations
         //Nx(K+1)xF
         let main_net_outputs = main_activations.pop().unwrap();
+
         //Split into (K+1) NxF feature maps
         let mut main_net_outputs = main_net_outputs.unbind(1);
         //Pull out the global output from the collection of outputs
@@ -134,7 +137,7 @@ impl NetworkConfig {
         let mut network_rollout_state = NetworkRolloutState::from_rollout_states(&self, rollout_states);
 
         //First, compute the loss for the base
-        let element_weighting = (1.0f64 / ((k_plus_l_squared * n) as f64)) as f32;
+        let element_weighting = 1.0f32;
         //N x k x k
         let network_visit_logits = &network_rollout_state.child_visit_logits;
         let actual_visit_probabilities = &playout_bundle.child_visit_probabilities[0];
@@ -165,14 +168,15 @@ impl NetworkConfig {
                               training_examples : &BatchSplitTrainingExamples, 
                               opt : &mut Optimizer,
                               device : Device,
-                              rng : &mut R) -> (f64, f64) { //return value is training loss, validation loss
+                              rng : &mut R
+                              ) -> (f64, f64) { //return value is training loss, validation loss
 
         let mut total_train_loss = 0f64;
         let num_iters = params.train_batches_per_save;
 
         //First, train
         for _ in 0..num_iters {
-            let mut iter_loss = 0f64;
+            let mut iter_loss = Tensor::scalar_tensor(0f64, (Kind::Float, device));
 
             opt.zero_grad();
 
@@ -185,23 +189,25 @@ impl NetworkConfig {
                 weighted_loss.backward();
 
                 //Accumulate to determine the overall iteration loss
-                iter_loss += f64::from(&weighted_loss)
+                iter_loss += &weighted_loss;
             }
-            println!("Iter loss: {}", iter_loss);
+            let iter_loss_float = f64::from(iter_loss);
+            println!("Iter loss: {}", iter_loss_float);
 
-            //Update model parameters based on gradients
             opt.step();
-            total_train_loss += iter_loss / (num_iters as f64);
+
+
+            total_train_loss += iter_loss_float / (num_iters as f64);
         }
 
         //Then, obtain validation loss
         let _guard = no_grad_guard();
-        let mut validation_loss = 0f64;
+        let mut validation_loss = Tensor::scalar_tensor(0f64, (Kind::Float, device)).detach();
         for (weight, playout_bundle) in training_examples.iter_validation_batches(device) {
             let loss = self.get_loss_for_playout_bundle(&playout_bundle);
             let weighted_loss = weight * loss;
-            validation_loss += f64::from(&weighted_loss);
+            validation_loss += weighted_loss;
         }
-        (total_train_loss, validation_loss)
+        (total_train_loss, f64::from(validation_loss))
     }
 }

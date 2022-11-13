@@ -43,13 +43,13 @@ impl VisitLogitMatrices {
         let flattened_policy = self.get_flattened_policy();
         flattened_policy.reshape(&[r, k_plus_t, k_plus_t])
     }
-
     //Gets the cross-entropy-with-logits loss for _just_ across the largest-indexed
     //row and column, treating the rest of the matrix as one block whose
     //contributions are pooled, but re-normalized to remove any bias from
     //this extra fake element.
     pub fn get_peel_loss(&self, target_policy : &Tensor) -> Tensor {
         let VisitLogitMatrices(child_visit_logits) = &self;
+
         let s = child_visit_logits.size();
         let (r, k_plus_t) = (s[0], s[1]);
         let ind = k_plus_t - 1;
@@ -74,11 +74,11 @@ impl VisitLogitMatrices {
         let logits_submatrices = logits_submatrices.slice(2, Option::None, Option::Some(ind), 1);
 
         let policy_submatrices = target_policy.slice(1, Option::None, Option::Some(ind), 1);
-        let policy_submatrices = target_policy.slice(2, Option::None, Option::Some(ind), 1);
+        let policy_submatrices = policy_submatrices.slice(2, Option::None, Option::Some(ind), 1);
 
         //R, detached since we don't care about gradients to this component
-        let logits_submatrix_sums = logits_submatrices.logsumexp(&[1, 2], false).detach();
-        let policy_submatrix_sums = policy_submatrices.sum_to_size(&[r, 1, 1]).reshape(&[r]).detach();
+        let logits_submatrix_sums = logits_submatrices.logsumexp(&[1, 2], false);
+        let policy_submatrix_sums = policy_submatrices.sum_to_size(&[r, 1, 1]).reshape(&[r]);
 
         //Now, replace the appropriate elements
         let batch_indices = Tensor::arange(r, (Kind::Int64, target_policy.device()));
@@ -99,6 +99,7 @@ impl VisitLogitMatrices {
 
         let normalization_factor = (((2 * k_plus_t - 1) as f64) / ((2 * k_plus_t) as f64)) as f32;
         let loss = normalization_factor * unnormalized_loss;
+		
         loss
     }
 
@@ -148,6 +149,7 @@ impl VisitLogitMatrices {
     }
     //Masks out the chosen moves from the matrices with a -inf
     pub fn mask_chosen(&mut self, left_indices : &Tensor, right_indices : &Tensor) {
+        let _guard = no_grad_guard();
         let r = self.get_num_matrices();
         let k_plus_t = self.get_matrix_dim();
 

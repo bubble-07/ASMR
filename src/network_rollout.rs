@@ -38,6 +38,9 @@ pub struct NetworkRolloutState {
     ///Logits for child visit tensors
     ///R x (k + t) x (k + t)
     pub child_visit_logits : VisitLogitMatrices,
+
+    ///Transformed added targets
+    pub transformed_flattened_targets : Tensor,
 }
 
 impl NetworkRolloutState {
@@ -55,6 +58,8 @@ impl NetworkRolloutState {
         let (rollout_states, flattened_added_matrices) = 
             self.rollout_states.perform_moves(left_indices, right_indices);
 
+        let flattened_transformed_added_matrices = flattened_added_matrices.asinh().detach();
+
         //Now to keep the network state up-to-date
         
         //Ensure that we mark the chosen indices as visited in the logit matrix
@@ -62,11 +67,11 @@ impl NetworkRolloutState {
         child_visit_logits.mask_chosen(left_indices, right_indices);
         
         //Derive the pre-activation for a new peel track
-        let flattened_targets = &rollout_states.flattened_targets;
+        let transformed_flattened_targets = &self.transformed_flattened_targets;
 
         //R x F
-        let added_single_embeddings = network_config.injector_net.forward(&flattened_added_matrices,
-                                                                          flattened_targets);
+        let added_single_embeddings = network_config.injector_net.forward(&flattened_transformed_added_matrices,
+                                                                          transformed_flattened_targets);
         
         //Update to the new layer activation peeling states by
         //"peeling forward" through the peel network, also yielding the
@@ -122,6 +127,7 @@ impl NetworkRolloutState {
             output_activations,
             global_output_activation : self.global_output_activation,
             child_visit_logits,
+            transformed_flattened_targets : self.transformed_flattened_targets,
         }
     }
 
@@ -129,10 +135,20 @@ impl NetworkRolloutState {
         -> NetworkRolloutState {
         let s = rollout_states.matrices.size();
         let (r, k_plus_t, m, _) = (s[0], s[1], s[2], s[3]);
-        let flattened_matrix_sets = rollout_states.matrices.reshape(&[r, k_plus_t, m * m]).unbind(1);
 
-        let single_embeddings = network_config.get_single_embeddings(&flattened_matrix_sets,
-                                                                     &rollout_states.flattened_targets);
+        //Using asinh for mapping due to having logarithmic growth
+        //with respect to the absolute value of the argument, which is roughly
+        //what we'd desire for normalizing the effects of repeated matrix multiplication
+        let flattened_transformed_matrix_sets = rollout_states.matrices
+                                                .reshape(&[r, k_plus_t, m * m])
+                                                .asinh().detach()
+                                                .unbind(1);
+        let transformed_flattened_targets = rollout_states.flattened_targets.asinh().detach();
+
+
+        let single_embeddings = network_config.get_single_embeddings(&flattened_transformed_matrix_sets,
+                                                                     &transformed_flattened_targets);
+
         let (layer_activations, global_output_activation, output_activations) =
             network_config.get_main_net_outputs(&single_embeddings);
 
@@ -148,6 +164,7 @@ impl NetworkRolloutState {
             output_activations,
             global_output_activation,
             child_visit_logits,
+            transformed_flattened_targets,
         }
     }
 }

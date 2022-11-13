@@ -1,5 +1,5 @@
 use tch::{nn, kind::Kind, nn::Init, nn::Module, Tensor, 
-    nn::Path, nn::Sequential, nn::Linear, nn::LinearConfig, nn::linear};
+    nn::Path, nn::Sequential, nn::LinearConfig};
 use std::borrow::Borrow;
 
 pub trait TriModule : std::fmt::Debug + Send {
@@ -139,6 +139,30 @@ impl Module for ResidualBlock {
     }
 }
 
+///Our own implementation of a linear layer,
+///to remove the stupid trace operation
+#[derive(Debug)]
+pub struct SimpleLinear {
+    pub ws : Tensor,
+    pub bs : Option<Tensor>,
+}
+
+pub fn simple_linear<'a, T : Borrow<Path<'a>>>(network_path : T,
+                                        in_dim : i64,
+                                        out_dim : i64,
+                                        c : LinearConfig) -> SimpleLinear {
+    let neural_net_linear = nn::linear(network_path, in_dim, out_dim, c);
+    SimpleLinear {
+        ws : neural_net_linear.ws,
+        bs : neural_net_linear.bs,
+    }
+}
+
+impl Module for SimpleLinear {
+    fn forward(&self, xs : &Tensor) -> Tensor {
+        xs.linear(&self.ws, self.bs.as_ref())
+    }
+}
 ///A single layer with a residual skip-connection
 #[derive(Debug)]
 pub struct LinearResidual {
@@ -170,9 +194,9 @@ pub fn linear_residual<'a, T : Borrow<Path<'a>>>(network_path : T,
 
 impl Module for LinearResidual {
     fn forward(&self, xs : &Tensor) -> Tensor {
-        let pre_activation = xs.matmul(&self.first_ws.tr()) + &self.first_bs;
+        let pre_activation = xs.linear(&self.first_ws, Option::Some(&self.first_bs));
         let post_activation = pre_activation.leaky_relu();
-        let post_weights = post_activation.matmul(&self.second_ws.tr()) + &self.second_bs;
+        let post_weights = post_activation.linear(&self.second_ws, Option::Some(&self.second_bs));
         post_weights + xs
     }
 }

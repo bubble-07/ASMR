@@ -432,6 +432,7 @@ fn distill_game_data_command(params : Params, game_data_root : &str, training_da
 
 fn train_command(params : Params, network_config_path : &str, training_data_path : &str) {
     let device = tch::Device::Cuda(params.gpu_slot);
+
     println!("Is cuDNN available?: {}", Cuda::cudnn_is_available());
     Cuda::set_user_enabled_cudnn(true);
     Cuda::cudnn_set_benchmark(true);

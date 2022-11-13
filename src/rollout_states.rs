@@ -98,6 +98,8 @@ impl RolloutStates {
         (updated_states, flattened_added_matrices)
     }
     pub fn from_playout_bundle_initial_state(playout_bundle : &PlayoutBundle) -> RolloutStates {
+        let _guard = no_grad_guard();
+
         let s = playout_bundle.flattened_initial_matrix_sets.size();
         let (n, k, m_squared) = (s[0], s[1], s[2]);
         let remaining_turns = playout_bundle.left_matrix_indices.size()[1] as usize;
@@ -156,6 +158,8 @@ impl RolloutStates {
     }
     //Expands a single-rollout "RolloutStates" to have R identical rollout states
     pub fn expand(self, R : usize) -> Self {
+        let _guard = no_grad_guard();
+
         let matrices = self.matrices.expand(&[R as i64, -1, -1, -1], false); 
         let min_distances = self.min_distances.expand(&[R as i64], false);
         let flattened_targets = self.flattened_targets.expand(&[R as i64, -1], false);
