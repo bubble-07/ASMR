@@ -15,6 +15,27 @@ pub struct BatchSplitTrainingExamples {
     pub training_examples : HashMap<(usize, usize), BatchSplitPlayoutBundle>,
 }
 
+struct ValidationBatchIterator<'a> {
+    batch_split_training_examples : &'a BatchSplitTrainingExamples,
+    device : Device,
+    plan : Vec<Vec<((usize, usize), f64, Range<i64>)>>,
+}
+impl<'a> Iterator for ValidationBatchIterator<'a> {
+    type Item = Vec<(f64, PlayoutBundle)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut step = self.plan.pop()?;
+        let device = self.device;
+        let training_examples = &self.batch_split_training_examples.training_examples;
+        let step_result : Vec<(f64, PlayoutBundle)> = 
+            step.drain(..).map(|(key, weight, range)| {
+                let playout_bundle = training_examples.get(&key).unwrap().playout_bundle.grab_batch(range, device);
+                (weight, playout_bundle)
+            }).collect();
+        Option::Some(step_result)
+    }
+}
+
 impl BatchSplitTrainingExamples {
     ///Iterates over one round of training batches (one training batch per (set-size, game-length)
     ///pair). All of the weights in the sequence sum to 1.
@@ -30,16 +51,45 @@ impl BatchSplitTrainingExamples {
     }
     ///Iterates over all validation batches. All of the weights in the sequence sum to 1.
     pub fn iter_validation_batches<'a>(&'a self, device : Device) -> 
-                                impl Iterator<Item = (f64, PlayoutBundle)> + 'a {
-        self.training_examples.values()
-            .flat_map(move |batch_split_bundle| {
-                let validation_batches = batch_split_bundle.batch_split.iter_validation_batches();
-                validation_batches.map(move |(batch_weight, batch_index_range)| {
-                    let weight = batch_split_bundle.weight * batch_weight;
-                    let playout_bundle_batch = batch_split_bundle.playout_bundle.grab_batch(batch_index_range, device);
-                    (weight, playout_bundle_batch)
-                })
-            })
+                                impl Iterator<Item = Vec<(f64, PlayoutBundle)>> + 'a {
+
+        //First, collect all of the validation batches for all of the training examples.
+        let mut validation_batch_indices_and_weights : 
+            HashMap<(usize, usize), Vec<(f64, Range<i64>)>> = 
+                                       self.training_examples.iter()
+                                       .map(|(key, batch_split_bundle)| {
+                                           let result_vec = batch_split_bundle.batch_split.iter_validation_batches()
+                                                                              .collect();
+                                           (*key, result_vec)
+                                        }).collect();
+        //Find the largest number of validation batches for any key
+        let max_batches_per_key = validation_batch_indices_and_weights.values()
+                                  .map(|vec| vec.len())
+                                  .max().unwrap();
+
+        //Build a (key, weight, range) doubly-nested vec first, where
+        //the inner dimension traverses different buckets, and the outer
+        //dimension is just repeated occurrences.
+        let mut plan = Vec::new();
+        for _ in 0..max_batches_per_key {
+            plan.push(Vec::new());
+        }
+        for key in self.training_examples.keys() {
+            let bundle_weight = self.training_examples.get(key).unwrap().weight;
+            let indices_and_weights = validation_batch_indices_and_weights.get_mut(key).unwrap();
+            for (combined_validation_batch_num, (batch_weight, indices)) in indices_and_weights.drain(..)
+                                                                      .enumerate() {
+                let weight = bundle_weight * batch_weight;
+                plan[combined_validation_batch_num].push((*key, weight, indices));
+            }
+        }
+        //With the plan in place, finally return the requested iterator.
+        let result = ValidationBatchIterator {
+            batch_split_training_examples : &self,
+            device,
+            plan
+        };
+        result
     }
 
     pub fn from_training_examples(mut training_examples : TrainingExamples,

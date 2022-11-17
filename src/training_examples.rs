@@ -34,6 +34,9 @@ fn remove(named_tensor_map : &mut HashMap<String, Tensor>, key : &str) -> Result
 }
 
 impl PlayoutBundle {
+    pub fn device(&self) -> Device {
+        self.left_matrix_indices.device()
+    }
     pub fn get_init_set_size(&self) -> usize {
         self.flattened_initial_matrix_sets.size()[1] as usize
     }
@@ -42,6 +45,9 @@ impl PlayoutBundle {
     }
     pub fn get_playout_length(&self) -> usize {
         self.left_matrix_indices.size()[1] as usize
+    }
+    pub fn get_final_set_size(&self) -> usize {
+        self.get_init_set_size() + self.get_playout_length()
     }
     pub fn get_flattened_matrix_dim(&self) -> usize {
         self.flattened_matrix_targets.size()[1] as usize

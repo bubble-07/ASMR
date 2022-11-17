@@ -10,6 +10,7 @@ use crate::training_examples::*;
 use crate::network_module::*;
 use crate::network_rollout::*;
 use crate::rollout_states::*;
+use crate::bunched_rollout::*;
 use ndarray::*;
 
 use rand::Rng;
@@ -119,51 +120,6 @@ impl NetworkConfig {
         logit_policy_mat
     }
 
-    ///Gets the loss for a given playout-bundle. This is normalized by the number
-    ///of elements in the final probability logit matrices and also by the number
-    ///of training examples contained within the playout bundle
-    pub fn get_loss_for_playout_bundle(&self, playout_bundle : &PlayoutBundle) -> Tensor {
-        let s = playout_bundle.flattened_initial_matrix_sets.size();
-        let (n, k, m) = (s[0], s[1], s[2]);
-        let l = playout_bundle.left_matrix_indices.size()[1];
-
-        let k_squared = k * k;
-        let k_plus_l = k + l;
-        let k_plus_l_squared = k_plus_l * k_plus_l;
-
-        let mut total_loss = Tensor::zeros(&[], (Kind::Float, playout_bundle.flattened_matrix_targets.device()));
-
-        let rollout_states = RolloutStates::from_playout_bundle_initial_state(&playout_bundle);
-        let mut network_rollout_state = NetworkRolloutState::from_rollout_states(&self, rollout_states);
-
-        //First, compute the loss for the base
-        let element_weighting = 1.0f32;
-        //N x k x k
-        let network_visit_logits = &network_rollout_state.child_visit_logits;
-        let actual_visit_probabilities = &playout_bundle.child_visit_probabilities[0];
-        let base_loss = network_visit_logits.get_loss(actual_visit_probabilities);
-        total_loss += element_weighting * base_loss;
-        
-        //Compute loss for each peel in turn
-        //Bound is (l-1) since we don't care about the loss at the point
-        //at which we _reach_ the goal.
-        for t in 0..((l-1) as usize) {
-            //Dimension: N
-            let left_matrix_indices = playout_bundle.left_matrix_indices.i((.., t as i64));
-            let right_matrix_indices = playout_bundle.right_matrix_indices.i((.., t as i64));
-
-            //Roll out the network one step
-            network_rollout_state = network_rollout_state.manual_step(&self,
-                                    &left_matrix_indices, &right_matrix_indices);
-
-            let network_visit_logits = &network_rollout_state.child_visit_logits;
-            let actual_visit_probabilities = &playout_bundle.child_visit_probabilities[t + 1];
-            let peel_loss = network_visit_logits.get_peel_loss(actual_visit_probabilities);
-            total_loss += element_weighting * peel_loss;
-        }
-        total_loss
-    }
-
     pub fn run_training_epoch<R : Rng + ?Sized>(&self, params : &Params, 
                               training_examples : &BatchSplitTrainingExamples, 
                               opt : &mut Optimizer,
@@ -179,34 +135,22 @@ impl NetworkConfig {
             let mut iter_loss = Tensor::scalar_tensor(0f64, (Kind::Float, device));
 
             opt.zero_grad();
+            
+            let batch = training_examples.iter_training_batches(rng, device).collect();
+            let iter_loss = get_loss_for_playout_bundles(&self, batch);
 
-            for (weight, playout_bundle) in training_examples.iter_training_batches(rng, device) {
-                let loss = self.get_loss_for_playout_bundle(&playout_bundle);
-                let weighted_loss = weight * loss;
-
-                //Backprop the losses from just this one bundle element.
-                //We'll use this to accumulate gradients for the optimizer to step later
-                weighted_loss.backward();
-
-                //Accumulate to determine the overall iteration loss
-                iter_loss += &weighted_loss;
-            }
-            let iter_loss_float = f64::from(iter_loss);
+            let iter_loss_float = f64::from(&iter_loss);
             println!("Iter loss: {}", iter_loss_float);
 
-            opt.step();
-
-
+            opt.backward_step(&iter_loss);
             total_train_loss += iter_loss_float / (num_iters as f64);
         }
 
         //Then, obtain validation loss
         let _guard = no_grad_guard();
         let mut validation_loss = Tensor::scalar_tensor(0f64, (Kind::Float, device)).detach();
-        for (weight, playout_bundle) in training_examples.iter_validation_batches(device) {
-            let loss = self.get_loss_for_playout_bundle(&playout_bundle);
-            let weighted_loss = weight * loss;
-            validation_loss += weighted_loss;
+        for validation_batch in training_examples.iter_validation_batches(device) {
+            validation_loss += get_loss_for_playout_bundles(&self, validation_batch);
         }
         (total_train_loss, f64::from(validation_loss))
     }

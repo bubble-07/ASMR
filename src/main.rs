@@ -3,6 +3,8 @@
 #![allow(unused_imports)]
 #![allow(unused_parens)]
 
+mod peeling_states;
+mod bunched_rollout;
 mod visit_logit_matrices;
 mod network_module;
 mod synthetic_data;

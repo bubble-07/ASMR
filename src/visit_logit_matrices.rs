@@ -18,6 +18,16 @@ use std::fmt;
 pub struct VisitLogitMatrices(pub Tensor);
 
 impl VisitLogitMatrices {
+    pub fn split(self, split_size : usize) -> Vec<VisitLogitMatrices> {
+        let mut visit_logit_matrices = self.0.split(split_size as i64, 0);
+        visit_logit_matrices.drain(..).map(|x| VisitLogitMatrices(x)).collect()
+    }
+    pub fn merge(mut visit_logit_matrices : Vec<VisitLogitMatrices>) -> VisitLogitMatrices {
+        let visit_logit_matrices : Vec<Tensor> = visit_logit_matrices.drain(..).map(|x| x.0).collect();
+        let visit_logit_matrices = Tensor::concat(&visit_logit_matrices, 0);
+        VisitLogitMatrices(visit_logit_matrices)
+    }
+
     pub fn get_num_matrices(&self) -> i64 {
         let VisitLogitMatrices(child_visit_logits) = &self;
         child_visit_logits.size()[0]

@@ -13,6 +13,7 @@ use std::convert::TryFrom;
 use rand::Rng;
 use rand::seq::SliceRandom;
 use core::iter::Sum;
+use std::iter::zip;
 
 
 ///Snapshot state of R rollouts for each matrix product among an initial set of k matrices,
@@ -34,6 +35,50 @@ pub struct RolloutStates {
 }
 
 impl RolloutStates {
+    ///Merges a collection of rollout states with the same values of
+    ///k+t and m, but possibly with differing numbers of rollouts
+    ///and/or differing numbers of remaining turns (the output
+    ///number of remaining turns will be the maximum of all inputs).
+    pub fn merge(states : Vec<RolloutStates>) -> RolloutStates {
+        let min_distances : Vec<Tensor> = states.iter().map(|x| x.min_distances.shallow_clone()).collect();
+        let flattened_targets : Vec<Tensor> = states.iter().map(|x| x.flattened_targets.shallow_clone()).collect();
+        let matrices : Vec<Tensor> = states.iter().map(|x| x.matrices.shallow_clone()).collect();
+
+        let min_distances = Tensor::concat(&min_distances, 0);
+        let flattened_targets = Tensor::concat(&flattened_targets, 0);
+        let matrices = Tensor::concat(&matrices, 0);
+        
+        let remaining_turns = states.iter().map(|x| x.remaining_turns).max().unwrap();
+
+        RolloutStates {
+            min_distances,
+            flattened_targets,
+            matrices,
+            remaining_turns,
+        }
+    }
+
+    ///Splits to a collection of rollout states where each
+    ///rollout state object contains the same number of rollouts
+    pub fn split(self, split_size : usize) -> Vec<RolloutStates> {
+        let split_size = split_size as i64;
+        let min_distances = self.min_distances.split(split_size, 0);
+        let flattened_targets = self.flattened_targets.split(split_size, 0);
+        let matrices = self.matrices.split(split_size, 0);
+        let remaining_turns = self.remaining_turns;
+
+        zip(zip(min_distances, flattened_targets), matrices)
+        .map(|((min_distances, flattened_targets), matrices)| 
+             RolloutStates {
+                 min_distances,
+                 flattened_targets,
+                 matrices,
+                 remaining_turns,
+             }
+            )
+        .collect()
+    }
+
     pub fn get_num_rollouts(&self) -> i64 {
         self.matrices.size()[0]
     }

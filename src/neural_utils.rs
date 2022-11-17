@@ -3,40 +3,7 @@ use tch::{nn, kind::Kind, nn::Init, nn::Module, Tensor,
 use std::borrow::Borrow;
 use crate::network_module::{SimpleLinear, simple_linear};
 use crate::params::*;
-
-#[derive(Debug)]
-pub struct PeelLayerState {
-    ///Values for look-ups via attentional layers -- N x K x F
-    pub values : Tensor,
-    ///Attention interaction value -> element linear transforms. One tensor of size N x F x K
-    pub interactions : Tensor,
-    ///Scaled interaction matrix
-    pub scaled_interaction_matrix : Tensor,
-}
-
-impl PeelLayerState {
-    fn push_track(&self, peel_track_state : &PeelTrackState) -> PeelLayerState {
-        let value = peel_track_state.value.unsqueeze(1);
-        let interaction = peel_track_state.interaction.unsqueeze(2);
-
-        let values = Tensor::concat(&[&self.values, &value], 1);
-        let interactions = Tensor::concat(&[&self.interactions, &interaction], 2);
-        PeelLayerState {
-            values,
-            interactions,
-            scaled_interaction_matrix : self.scaled_interaction_matrix.shallow_clone(),
-        }
-    }
-}
-
-//State for a single track in a peel layer
-#[derive(Debug)]
-pub struct PeelTrackState {
-    ///Value for look-up via subsequent attentional layers -- N x F
-    pub value : Tensor,
-    ///Attention interaction value -> value weight scalar transform -- N x F
-    pub interaction : Tensor
-}
+use crate::peeling_states::*;
 
 #[derive(Debug)]
 pub struct PeelStack {
@@ -46,7 +13,7 @@ pub struct PeelStack {
 impl PeelStack {
     //Given a stack of per-layer [pre-] activations, yields the peeling states
     //layer-by-layer
-    pub fn forward_to_peel_state(&self, layer_activations : &[Tensor]) -> Vec<PeelLayerState> {
+    pub fn forward_to_peel_state(&self, layer_activations : &[Tensor]) -> PeelLayerStates {
         let mut result = Vec::new();
         for i in 0..self.layers.len() {
             let layer = &self.layers[i];
@@ -54,22 +21,24 @@ impl PeelStack {
             let peeling_state = layer.forward_to_peel_state(pre_activation);
             result.push(peeling_state);
         }
-        result
+        PeelLayerStates::new(result)
     }
     //Given current per-layer peel layer states, and the pre-activation for a new
     //"peel" track, yields the updated peel layer states incorporating the new track
     //and the final activation map out of the peel
-    pub fn peel_forward(&self, peel_layer_states : &[PeelLayerState], x : &Tensor) -> (Vec<PeelLayerState>, Tensor) {
-        let mut updated_peeling_states = Vec::new();
+    pub fn peel_forward(&self, peel_layer_states : PeelLayerStates, x : &Tensor) -> (PeelLayerStates, Tensor) {
         let mut activation = x.shallow_clone();
+        let mut peeling_tracks = Vec::new();
         for i in 0..self.layers.len() {
             let layer = &self.layers[i];
-            let peeling_state = &peel_layer_states[i];
-            let (peeling_track, post_activation) = layer.peel_forward(peeling_state, &activation);
+            let peeling_state = peel_layer_states.get_layer_state(i);
+            let (peeling_track, post_activation) = layer.peel_forward(&peeling_state, &activation);
             activation = post_activation;
-            let updated_peeling_state = peeling_state.push_track(&peeling_track);
-            updated_peeling_states.push(updated_peeling_state);
+
+            peeling_tracks.push(peeling_track);
         }
+        let peeling_tracks = PeelTrackStates::new(peeling_tracks);
+        let updated_peeling_states = peel_layer_states.push_tracks(peeling_tracks);
         (updated_peeling_states, activation)
     }
 }

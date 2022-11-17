@@ -12,10 +12,12 @@ use crate::visit_logit_matrices::*;
 use crate::network_module::*;
 use ndarray::*;
 use std::convert::TryFrom;
+use std::iter::zip;
 
 use rand::Rng;
 use rand::seq::SliceRandom;
 use core::iter::Sum;
+use crate::peeling_states::*;
 
 ///Snapshot state of R rollouts for each matrix product among an initial set of k matrices,
 ///where each snapshot takes place at some number of turns after the initial turn
@@ -25,11 +27,11 @@ pub struct NetworkRolloutState {
 
     ///Ordered per-layer peeling states. L of them, each with N->R, K->(k+t) for
     ///t the current number of elapsed turns.
-    pub peeling_states : Vec<PeelLayerState>,
+    pub peeling_states : PeelLayerStates,
 
     ///Output activation maps for all of the matrices in the network
     ///(k + t) x R x F
-    pub output_activations : Vec<Tensor>,
+    pub output_activations : Tensor,
 
     ///Global output activation maps
     ///R x F
@@ -40,10 +42,76 @@ pub struct NetworkRolloutState {
     pub child_visit_logits : VisitLogitMatrices,
 
     ///Transformed added targets
+    ///R x M
     pub transformed_flattened_targets : Tensor,
 }
 
 impl NetworkRolloutState {
+    ///Splits to a collection of network rollout states
+    ///where each rollout state object contains the same number of rollouts
+    pub fn split(self, split_size : usize) -> Vec<NetworkRolloutState> {
+        let rollout_states = self.rollout_states.split(split_size);
+        let peeling_states = self.peeling_states.split(split_size);
+        let child_visit_logits = self.child_visit_logits.split(split_size);
+
+        let split_size = split_size as i64;
+
+        let transformed_flattened_targets = self.transformed_flattened_targets.split(split_size, 0);         
+        let output_activations = self.output_activations.split(split_size, 1);
+        let global_output_activation = self.global_output_activation.split(split_size, 0);
+
+        zip(zip(zip(zip(zip(rollout_states, peeling_states), child_visit_logits),
+            transformed_flattened_targets), output_activations), global_output_activation)
+        .map(|(((((rollout_states, peeling_states), child_visit_logits),
+            transformed_flattened_targets), output_activations), global_output_activation)|
+            NetworkRolloutState {
+                rollout_states,
+                peeling_states,
+                child_visit_logits,
+                transformed_flattened_targets,
+                output_activations,
+                global_output_activation
+            }
+        )
+        .collect()
+    }
+
+    ///Merges a collection of rollout states with the same values
+    ///of k, t, m and f, but possibly differing numbers of
+    ///rollouts or differing numbers of remaining turns.
+    ///(the output number of remaining turns will be the maximum of
+    ///all inputs)
+    pub fn merge(mut states : Vec<NetworkRolloutState>) -> NetworkRolloutState {
+        let mut rollout_states = Vec::new();
+        let mut peeling_states = Vec::new();
+        let mut output_activations = Vec::new();
+        let mut global_output_activation = Vec::new();
+        let mut child_visit_logits = Vec::new();
+        let mut transformed_flattened_targets = Vec::new();
+        for state in states.drain(..) {
+            rollout_states.push(state.rollout_states);
+            peeling_states.push(state.peeling_states);
+            output_activations.push(state.output_activations);
+            global_output_activation.push(state.global_output_activation);
+            child_visit_logits.push(state.child_visit_logits);
+            transformed_flattened_targets.push(state.transformed_flattened_targets);
+        }
+        let rollout_states = RolloutStates::merge(rollout_states);
+        let peeling_states = PeelLayerStates::merge(peeling_states);
+        let output_activations = Tensor::concat(&output_activations, 1);
+        let global_output_activation = Tensor::concat(&global_output_activation, 0);
+        let child_visit_logits = VisitLogitMatrices::merge(child_visit_logits);
+        let transformed_flattened_targets = Tensor::concat(&transformed_flattened_targets, 0);
+
+        NetworkRolloutState {
+            rollout_states,
+            peeling_states,
+            output_activations,
+            global_output_activation,
+            child_visit_logits,
+            transformed_flattened_targets,
+        }
+    }
     pub fn step(self, network_config : &NetworkConfig) -> Self {
         let (left_indices, right_indices) = self.child_visit_logits.draw_indices();
         
@@ -77,21 +145,21 @@ impl NetworkRolloutState {
         //"peeling forward" through the peel network, also yielding the
         //final activation out of the peeling track
         let (peeling_states, added_output_activations) = 
-            network_config.peel_net.peel_forward(&self.peeling_states, &added_single_embeddings);
+            network_config.peel_net.peel_forward(self.peeling_states, &added_single_embeddings);
 
         //Expand child visit logit matrices from the newly-added output activations
         let mut left_logits = Vec::new();
         let mut right_logits = Vec::new();
         for other_index in 0..init_k_plus_t {
-            let other_activations = &self.output_activations[other_index];
+            let other_activations = self.output_activations.i((other_index as i64, .., ..));
             //Other as the left index
             //Dimension Rx1
-            let left_logit = network_config.policy_extraction_net.forward(other_activations, 
+            let left_logit = network_config.policy_extraction_net.forward(&other_activations, 
                                                                            &added_output_activations, 
                                                                            &self.global_output_activation);
             //Other as the right index
             let right_logit = network_config.policy_extraction_net.forward(&added_output_activations,
-                                                                           other_activations,
+                                                                           &other_activations,
                                                                            &self.global_output_activation);
             left_logits.push(left_logit);
             right_logits.push(right_logit);
@@ -118,8 +186,8 @@ impl NetworkRolloutState {
         let child_visit_logits = VisitLogitMatrices(child_visit_logits);
         
         //Add output activations to our running list
-        let mut output_activations = self.output_activations;
-        output_activations.push(added_output_activations);
+        let added_output_activations = added_output_activations.unsqueeze(0);
+        let output_activations = Tensor::concat(&[self.output_activations, added_output_activations], 0);
 
         NetworkRolloutState {
             rollout_states,
@@ -131,6 +199,7 @@ impl NetworkRolloutState {
         }
     }
 
+    //From an initial rolloutstates - must not have made any turns yet!
     pub fn from_rollout_states(network_config : &NetworkConfig, rollout_states : RolloutStates)
         -> NetworkRolloutState {
         let s = rollout_states.matrices.size();
@@ -157,6 +226,8 @@ impl NetworkRolloutState {
         let child_visit_logits = VisitLogitMatrices(child_visit_logits);
 
         let peeling_states = network_config.peel_net.forward_to_peel_state(&layer_activations);
+
+        let output_activations = Tensor::stack(&output_activations, 0);
 
         NetworkRolloutState {
             rollout_states,
