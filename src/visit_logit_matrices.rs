@@ -18,8 +18,8 @@ use std::fmt;
 pub struct VisitLogitMatrices(pub Tensor);
 
 impl VisitLogitMatrices {
-    pub fn split(self, split_size : usize) -> Vec<VisitLogitMatrices> {
-        let mut visit_logit_matrices = self.0.split(split_size as i64, 0);
+    pub fn split(self, split_sizes : &[i64]) -> Vec<VisitLogitMatrices> {
+        let mut visit_logit_matrices = self.0.split_with_sizes(split_sizes, 0);
         visit_logit_matrices.drain(..).map(|x| VisitLogitMatrices(x)).collect()
     }
     pub fn merge(mut visit_logit_matrices : Vec<VisitLogitMatrices>) -> VisitLogitMatrices {
@@ -57,7 +57,7 @@ impl VisitLogitMatrices {
     //row and column, treating the rest of the matrix as one block whose
     //contributions are pooled, but re-normalized to remove any bias from
     //this extra fake element.
-    pub fn get_peel_loss(&self, target_policy : &Tensor) -> Tensor {
+    pub fn get_peel_loss(&self, target_policy : &Tensor, label_smoothing_factor : f64) -> Tensor {
         let VisitLogitMatrices(child_visit_logits) = &self;
 
         let s = child_visit_logits.size();
@@ -74,8 +74,6 @@ impl VisitLogitMatrices {
         let all_logits = Tensor::concat(&[last_row_logits, last_col_logits], 1);
         let all_policy = Tensor::concat(&[last_row_policy, last_col_policy], 1);
 
-        let flat_dim = r * 2 * k_plus_t as i64;
-
         //Replace the very last element with probability-sums over the interior
         //matrices not including the last index. For the logits matrix,
         //this will mean using logsumexp instead.
@@ -86,7 +84,7 @@ impl VisitLogitMatrices {
         let policy_submatrices = target_policy.slice(1, Option::None, Option::Some(ind), 1);
         let policy_submatrices = policy_submatrices.slice(2, Option::None, Option::Some(ind), 1);
 
-        //R, detached since we don't care about gradients to this component
+        //R
         let logits_submatrix_sums = logits_submatrices.logsumexp(&[1, 2], false);
         let policy_submatrix_sums = policy_submatrices.sum_to_size(&[r, 1, 1]).reshape(&[r]);
 
@@ -98,34 +96,45 @@ impl VisitLogitMatrices {
         let all_policy = all_policy.put(&batch_indices, &policy_submatrix_sums, false);
         
         //With that info, output a loss
-        let log_softmaxed = all_logits.log_softmax(1, Kind::Float);
-        let one_over_r = 1.0f32 / (r as f32);
-
-        let log_softmaxed_flattened = log_softmaxed.reshape(&[flat_dim]);
-        let all_policy_flattened = all_policy.reshape(&[flat_dim]);
-
-        let inner_product = log_softmaxed_flattened.dot(&all_policy_flattened);
-        let unnormalized_loss = -one_over_r * inner_product;
-
-        let normalization_factor = (((2 * k_plus_t - 1) as f64) / ((2 * k_plus_t) as f64)) as f32;
+        let unnormalized_loss = Self::softmax_cross_entropy_with_logits(&all_logits, &all_policy,
+                                                                        label_smoothing_factor);
+        let normalization_factor = (((2 * k_plus_t - 1) as f64) / ((2 * k_plus_t) as f64));
         let loss = normalization_factor * unnormalized_loss;
-		
         loss
     }
 
-    pub fn get_loss(&self, target_policy : &Tensor) -> Tensor {
-        let r = self.get_num_matrices();
-        let k_plus_t = self.get_matrix_dim();
+    pub fn get_loss(&self, target_policy : &Tensor, label_smoothing_factor : f64) -> Tensor {
         let VisitLogitMatrices(child_visit_logits) = &self;
+        Self::softmax_cross_entropy_with_logits(child_visit_logits, target_policy,
+                                                label_smoothing_factor)
+    }
 
-        let flattened_unnormalized_policy = child_visit_logits.reshape(&[r, (k_plus_t * k_plus_t)]);
-        let log_softmaxed = flattened_unnormalized_policy.log_softmax(1, Kind::Float);
+    //Assuming the first dimension is the batch dimension, compute cross-entropy with logits
+    //normalized by the number of samples in the batch.
+    fn softmax_cross_entropy_with_logits(logits : &Tensor, target_policy : &Tensor,
+                                         label_smoothing_factor : f64) -> Tensor {
+        let r = logits.size()[0];
+        let total_size = logits.size().drain(..).fold(1, |a, b| a * b);
+        let remainder_size = total_size / r;
 
-        let one_over_r = 1.0f32 / (r as f32);
+        let one_over_r = 1.0f64 / (r as f64);
 
-        let flattened_log_softmaxed = one_over_r * log_softmaxed.reshape(&[r * k_plus_t * k_plus_t]);
-        let flattened_target_policy = target_policy.reshape(&[r * k_plus_t * k_plus_t]);
-        let inner_product = flattened_target_policy.dot(&flattened_log_softmaxed);
+        let nonflat_dim = [r, remainder_size];
+        let flat_dim = [total_size];
+
+        let reshaped_logits = logits.reshape(&nonflat_dim);
+        let log_softmaxed = reshaped_logits.log_softmax(1, Kind::Float);
+
+        let flattened_log_softmaxed = one_over_r * log_softmaxed.reshape(&flat_dim);
+        let flattened_target_policy = target_policy.reshape(&flat_dim);
+
+        //Smooth the target policy
+        let uniform_element_value = 1.0f64 / (remainder_size as f64);
+        let smoothed_flattened_policy = (1.0f64 - label_smoothing_factor) * flattened_target_policy +
+                                        (label_smoothing_factor * uniform_element_value);
+
+
+        let inner_product = smoothed_flattened_policy.dot(&flattened_log_softmaxed);
 
         -inner_product
     }

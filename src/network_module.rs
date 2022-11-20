@@ -180,7 +180,7 @@ pub fn linear_residual<'a, T : Borrow<Path<'a>>>(network_path : T,
     let first_bs = network_path.var("first_bias", &[dim as i64], Init::Uniform {lo : -bound, up : bound});
     let first_ws = network_path.var("first_weights", &[dim as i64, dim as i64], Init::KaimingUniform);
 
-    //Inspired by normalizer-free ResNets, we initialize these to zero
+    //Inspired by ReZero [batchnorm-free resnets], we initialize these to zero
     let second_bs = network_path.var("second_bias", &[dim as i64], Init::Const(0.0));
     let second_ws = network_path.var("second_weights", &[dim as i64, dim as i64], Init::Const(0.0));
 

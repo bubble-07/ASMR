@@ -4,6 +4,7 @@ use crate::training_examples::*;
 use crate::network_rollout::*;
 use crate::network_config::*;
 use crate::rollout_states::*;
+use crate::params::*;
 use std::iter::zip;
 
 struct PlayoutBundleTailNode {
@@ -29,14 +30,25 @@ impl PlayoutBundleTail {
         self.tail_nodes.pop()
     }
     fn new(playout_bundle : PlayoutBundle) -> PlayoutBundleTail {
-        //Need to remove element 0, since that's part of the tail
+        //We're going to reverse each involved list, since they're in
+        //chronological order, but we need them to _pop_ in chronological order
         let mut child_visit_probabilities = playout_bundle.child_visit_probabilities;
-        child_visit_probabilities.remove(0);
+        child_visit_probabilities.reverse();
+        //Need to remove the first child visit probability matrix, since that's
+        //handled in the base.
+        child_visit_probabilities.pop();
 
-        let left_matrix_indices = playout_bundle.left_matrix_indices.unbind(1);
-        let right_matrix_indices = playout_bundle.right_matrix_indices.unbind(1);
-        
-        let mut tail_nodes : Vec<PlayoutBundleTailNode> = 
+        //Need to remove the last indices, because these are used to get to the final
+        //state, and so they're not necessary to get a rollout state which is necessary
+        //for training.
+        let mut left_matrix_indices = playout_bundle.left_matrix_indices.unbind(1);
+        let mut right_matrix_indices = playout_bundle.right_matrix_indices.unbind(1);
+        left_matrix_indices.pop();
+        right_matrix_indices.pop();
+        left_matrix_indices.reverse();
+        right_matrix_indices.reverse();
+
+        let tail_nodes : Vec<PlayoutBundleTailNode> = 
             zip(zip(child_visit_probabilities, left_matrix_indices), right_matrix_indices)
             .map(|((child_visit_probabilities, left_matrix_indices), right_matrix_indices)|
             PlayoutBundleTailNode {
@@ -44,8 +56,6 @@ impl PlayoutBundleTail {
                 left_matrix_indices,
                 right_matrix_indices,
             }).collect();
-        //Reverse them so that popping is in the right order
-        tail_nodes.reverse();
         PlayoutBundleTail {
             tail_nodes
         }
@@ -61,8 +71,8 @@ struct BundleState {
 }
 
 impl BundleState {
-    pub fn get_batch_size(&self) -> usize {
-        self.network_rollout_state.global_output_activation.size()[0] as usize
+    pub fn get_batch_size(&self) -> i64 {
+        self.network_rollout_state.global_output_activation.size()[0]
     }
     pub fn get_device(&self) -> Device {
         self.network_rollout_state.output_activations.device()
@@ -74,10 +84,10 @@ impl BundleState {
     ///(implicitly referenced in their NetworkRolloutState), advance
     ///them forward to obtain a peel loss and new bundle states one turn
     ///into the future.
-    pub fn advance(network_config : &NetworkConfig,
+    pub fn advance(network_config : &NetworkConfig, params : &Params,
                    mut bundle_states : Vec<BundleState>) -> (Tensor, Vec<BundleState>) {
         let device = bundle_states[0].get_device();
-        let batch_size = bundle_states[0].get_batch_size();
+        let sizes : Vec<i64> = bundle_states.iter().map(|x| x.get_batch_size()).collect();
         let mut total_loss = Tensor::zeros(&[], (Kind::Float, device));
 
         let mut left_matrix_indices = Vec::new();
@@ -109,14 +119,15 @@ impl BundleState {
         let mut result_states = Vec::new();
 
         //And finally, split the result back out and calculate loss
-        let mut network_rollout_states = network_rollout_states.split(batch_size);
+        let mut network_rollout_states = network_rollout_states.split(&sizes);
         for (network_rollout_state, carryforwards) in network_rollout_states.drain(..)
                                                     .zip(carryforwards.drain(..)) {
             let (init_set_size, final_set_size,
                  weight, bundle_tail, child_visit_probabilities) = carryforwards;
 
             let network_visit_logits = &network_rollout_state.child_visit_logits;
-            let peel_loss = network_visit_logits.get_peel_loss(&child_visit_probabilities);
+            let peel_loss = network_visit_logits.get_peel_loss(&child_visit_probabilities,
+                                                               params.label_smoothing_factor);
             total_loss += weight * peel_loss;
             
             let result_state = BundleState {
@@ -134,11 +145,10 @@ impl BundleState {
     }
 }
 
-pub fn get_loss_for_playout_bundles(network_config : &NetworkConfig,
+pub fn get_loss_for_playout_bundles(network_config : &NetworkConfig, params : &Params,
                                     mut playout_bundles : Vec<(f64, PlayoutBundle)>) -> Tensor {
     //SETUP
 
-    let batch_size = playout_bundles[0].1.get_num_playouts();
     let mut total_loss = Tensor::zeros(&[], (Kind::Float, playout_bundles[0].1.device()));
     let num_bundles = playout_bundles.len();
     let mut bundle_states : Vec<Option<BundleState>> = std::iter::repeat_with(|| Option::None)
@@ -186,11 +196,14 @@ pub fn get_loss_for_playout_bundles(network_config : &NetworkConfig,
             let rollout_states = RolloutStates::from_playout_bundle_initial_state(bundle);
             rollout_states_for_size.push(rollout_states);
         }
+        //Determine the sizes of all of the rollout states
+        let batch_sizes : Vec<i64> = rollout_states_for_size.iter().map(|x| x.get_num_rollouts()).collect();
+
         let merged_rollout_state = RolloutStates::merge(rollout_states_for_size);
         let merged_network_rollout = NetworkRolloutState::from_rollout_states(network_config, merged_rollout_state);
 
         //Then split that into a bunch of network rollout states for each bundle
-        let mut network_rollouts = merged_network_rollout.split(batch_size);
+        let mut network_rollouts = merged_network_rollout.split(&batch_sizes);
 
         for (((index, weight), bundle), network_rollout_state) in
             zip(zip(zip(indices_for_size.drain(..), weights_for_size.drain(..)), 
@@ -198,12 +211,15 @@ pub fn get_loss_for_playout_bundles(network_config : &NetworkConfig,
             //Compute the base loss, and add it to our total
             let network_visit_logits = &network_rollout_state.child_visit_logits;
             let actual_visit_probabilities = &bundle.child_visit_probabilities[0];
-            let base_loss = network_visit_logits.get_loss(actual_visit_probabilities);
+            let base_loss = network_visit_logits.get_loss(actual_visit_probabilities,
+                                                          params.label_smoothing_factor);
             total_loss += weight * base_loss;
 
             //Get the newly-minted bundle to package
             let init_set_size = bundle.get_init_set_size();
             let final_set_size = bundle.get_final_set_size();
+            //Note: Some of these bundles might have empty tails.
+            //That's okay, we'll remove 'em prior to handling peels.
             let bundle_tail = PlayoutBundleTail::new(bundle);
             let bundle_state = BundleState {
                 init_set_size,
@@ -236,14 +252,25 @@ pub fn get_loss_for_playout_bundles(network_config : &NetworkConfig,
     //where the elements are index vectors pointing to bundles which
     //have that peel set size in the range of set sizes that the
     //playout bundle covers.
-    let mut peel_set_size_index_map : Vec<Vec<usize>> = vec![Vec::new(); peel_set_size_spread + 1];
+    let mut peel_set_size_index_map : Vec<Vec<usize>> = vec![Vec::new(); peel_set_size_spread];
     for i in 0..num_bundles {
         let bundle_state = bundle_states[i].as_ref().unwrap();
         let init_set_size = bundle_state.init_set_size;
         let final_set_size = bundle_state.final_set_size;
-        for set_size in (init_set_size + 1)..=final_set_size {
-            let set_size_offset = set_size - min_peel_set_size;
-            peel_set_size_index_map[set_size_offset].push(i);
+        //TODO: Maybe compact these ahead-of-time, so that they don't even enter into
+        //the peel calculations section?
+        //Special case: void all bundle states which take exactly one turn to solve
+        //[and therefore, are already solved before getting to the peel]
+        if (init_set_size + 1 == final_set_size) {
+            bundle_states[i] = Option::None
+        } else {
+            //Note that we do not include the final set size, because that's what we're
+            //going to be stepping _to_ [for the last move], and therefore that won't
+            //enter into our training data.
+            for set_size in (init_set_size + 1)..final_set_size {
+                let set_size_offset = set_size - min_peel_set_size;
+                peel_set_size_index_map[set_size_offset].push(i);
+            }
         }
     }
 
@@ -260,7 +287,8 @@ pub fn get_loss_for_playout_bundles(network_config : &NetworkConfig,
             continue;
         }
         //Take the bundle states and advance them
-        let (partial_loss, mut updated_bundles) = BundleState::advance(network_config, bundle_states_for_size);
+        let (partial_loss, mut updated_bundles) = BundleState::advance(network_config, params,
+                                                                       bundle_states_for_size);
 
         //Contribute partial loss to the total
         total_loss += partial_loss;

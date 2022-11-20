@@ -48,17 +48,16 @@ pub struct NetworkRolloutState {
 
 impl NetworkRolloutState {
     ///Splits to a collection of network rollout states
-    ///where each rollout state object contains the same number of rollouts
-    pub fn split(self, split_size : usize) -> Vec<NetworkRolloutState> {
-        let rollout_states = self.rollout_states.split(split_size);
-        let peeling_states = self.peeling_states.split(split_size);
-        let child_visit_logits = self.child_visit_logits.split(split_size);
+    ///where each rollout state object contains the specified number
+    ///of samples [according to split_sizes]
+    pub fn split(self, split_sizes : &[i64]) -> Vec<NetworkRolloutState> {
+        let rollout_states = self.rollout_states.split(split_sizes);
+        let peeling_states = self.peeling_states.split(split_sizes);
+        let child_visit_logits = self.child_visit_logits.split(split_sizes);
 
-        let split_size = split_size as i64;
-
-        let transformed_flattened_targets = self.transformed_flattened_targets.split(split_size, 0);         
-        let output_activations = self.output_activations.split(split_size, 1);
-        let global_output_activation = self.global_output_activation.split(split_size, 0);
+        let transformed_flattened_targets = self.transformed_flattened_targets.split_with_sizes(split_sizes, 0);         
+        let output_activations = self.output_activations.split_with_sizes(split_sizes, 1);
+        let global_output_activation = self.global_output_activation.split_with_sizes(split_sizes, 0);
 
         zip(zip(zip(zip(zip(rollout_states, peeling_states), child_visit_logits),
             transformed_flattened_targets), output_activations), global_output_activation)

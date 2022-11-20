@@ -60,11 +60,10 @@ impl RolloutStates {
 
     ///Splits to a collection of rollout states where each
     ///rollout state object contains the same number of rollouts
-    pub fn split(self, split_size : usize) -> Vec<RolloutStates> {
-        let split_size = split_size as i64;
-        let min_distances = self.min_distances.split(split_size, 0);
-        let flattened_targets = self.flattened_targets.split(split_size, 0);
-        let matrices = self.matrices.split(split_size, 0);
+    pub fn split(self, split_sizes : &[i64]) -> Vec<RolloutStates> {
+        let min_distances = self.min_distances.split_with_sizes(split_sizes, 0);
+        let flattened_targets = self.flattened_targets.split_with_sizes(split_sizes, 0);
+        let matrices = self.matrices.split_with_sizes(split_sizes, 0);
         let remaining_turns = self.remaining_turns;
 
         zip(zip(min_distances, flattened_targets), matrices)

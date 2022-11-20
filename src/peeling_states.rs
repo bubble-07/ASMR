@@ -56,28 +56,28 @@ impl PeelTrackStates {
 
 impl PeelLayerStates {
     ///Splits to a collection of peel layer states with
-    ///the same number of samples for each
-    pub fn split(self, split_size : usize) -> Vec<PeelLayerStates> {
-        let split_size = split_size as i64;
-
-        let mut values = self.values.split(split_size, 0);
-        let mut interactions = self.interactions.split(split_size, 0);
-        let result = Vec::new();
+    ///the specified number of samples for each
+    pub fn split(self, split_sizes : &[i64]) -> Vec<PeelLayerStates> {
+        let mut values = self.values.split_with_sizes(split_sizes, 1);
+        let mut interactions = self.interactions.split_with_sizes(split_sizes, 1);
+        let mut result = Vec::new();
         for (values, interactions) in values.drain(..).zip(interactions.drain(..)) {
             let peel_layer_states = PeelLayerStates {
                 values,
                 interactions,
                 scaled_interaction_matrices : self.scaled_interaction_matrices.shallow_clone(),
             };
+            result.push(peel_layer_states);
         }
         result
     }
+    ///Merges samples of all peel layer states
     pub fn merge(mut peel_layer_states : Vec<PeelLayerStates>) -> PeelLayerStates {
         let values : Vec<Tensor> = peel_layer_states.iter().map(|x| x.values.shallow_clone()).collect();
         let interactions : Vec<Tensor> = peel_layer_states.iter().map(|x| x.interactions.shallow_clone()).collect();
 
-        let values = Tensor::concat(&values, 0);
-        let interactions = Tensor::concat(&interactions, 0);
+        let values = Tensor::concat(&values, 1);
+        let interactions = Tensor::concat(&interactions, 1);
 
         //Scaled interaction matrices shouldn't really change
         let scaled_interaction_matrices = peel_layer_states.pop().unwrap().scaled_interaction_matrices;
@@ -87,6 +87,7 @@ impl PeelLayerStates {
             scaled_interaction_matrices,
         }
     }
+    ///Gets the peeling states of a given layer
     pub fn get_layer_state(&self, layer_num : usize) -> PeelLayerState {
         let layer_num = layer_num as i64;
         let values = self.values.i((layer_num, .., .., ..));
@@ -98,6 +99,8 @@ impl PeelLayerStates {
             scaled_interaction_matrix
         }
     }
+    ///Stack together per-layer PeelLayerStates into a PeelLayerStates
+    ///for all layers.
     pub fn new(peel_layer_states : Vec<PeelLayerState>) -> PeelLayerStates {
         let values : Vec<Tensor> = peel_layer_states.iter().map(|x| x.values.shallow_clone()).collect();         
         let interactions : Vec<Tensor> = peel_layer_states.iter().map(|x| x.interactions.shallow_clone()).collect();
@@ -113,6 +116,7 @@ impl PeelLayerStates {
             scaled_interaction_matrices
         }
     }
+    ///Pushes track along every layer to derive a new peeling state for every layer.
     pub fn push_tracks(self, peel_track_states : PeelTrackStates) -> PeelLayerStates {
         let track_values = peel_track_states.values.unsqueeze(2);
         let track_interactions = peel_track_states.interactions.unsqueeze(3);

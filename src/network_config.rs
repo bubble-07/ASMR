@@ -132,12 +132,9 @@ impl NetworkConfig {
 
         //First, train
         for _ in 0..num_iters {
-            let mut iter_loss = Tensor::scalar_tensor(0f64, (Kind::Float, device));
-
             opt.zero_grad();
-            
             let batch = training_examples.iter_training_batches(rng, device).collect();
-            let iter_loss = get_loss_for_playout_bundles(&self, batch);
+            let iter_loss = get_loss_for_playout_bundles(&self, params, batch);
 
             let iter_loss_float = f64::from(&iter_loss);
             println!("Iter loss: {}", iter_loss_float);
@@ -150,7 +147,7 @@ impl NetworkConfig {
         let _guard = no_grad_guard();
         let mut validation_loss = Tensor::scalar_tensor(0f64, (Kind::Float, device)).detach();
         for validation_batch in training_examples.iter_validation_batches(device) {
-            validation_loss += get_loss_for_playout_bundles(&self, validation_batch);
+            validation_loss += get_loss_for_playout_bundles(&self, params, validation_batch);
         }
         (total_train_loss, f64::from(validation_loss))
     }

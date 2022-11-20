@@ -114,7 +114,7 @@ impl PeelLayer {
     pub fn peel_forward(&self, peel_layer_state : &PeelLayerState, x : &Tensor) -> (PeelTrackState, Tensor) {
         let (peel_track_state, after_attention) = self.read_only_attention.peel_forward(peel_layer_state, x);
         let after_linear = self.pre_linear.forward(&x);
-        let sum = &after_linear + &after_attention;
+        let sum = 0.5f64 * (&after_linear + &after_attention);
         let post_activation = sum.leaky_relu();
         let output = self.post_linear.forward(&post_activation) + x;
         (peel_track_state, output)
@@ -197,14 +197,15 @@ impl ResidualAttentionLayerWithGlobalTrack {
         let general_inputs = general_inputs.reshape(&[leading_dim, f]);
         let after_attention_general = after_attention_general.reshape(&[leading_dim, f]);
         let after_linear = self.pre_linear_general.forward(&general_inputs);
-        let sum = &after_linear + after_attention_general;
+        let sum = 0.5f64 * (&after_linear + after_attention_general);
         let post_activation = sum.leaky_relu();
         let general_outputs = self.post_linear_general.forward(&post_activation) + general_inputs;
 
         let general_outputs = general_outputs.reshape(&[n, k - 1, f]);
 
         //Derive the global output
-        let sum_global = &after_attention_global + &self.pre_linear_global.forward(&global_input);
+        let sum_global = 0.5f64 * (&after_attention_global + 
+                                   &self.pre_linear_global.forward(&global_input));
         let post_activation_global = sum_global.leaky_relu();
         let output_global = self.post_linear_global.forward(&post_activation_global) + &global_input;
         let output_global = output_global.reshape(&[n, 1, f]);
@@ -249,7 +250,7 @@ pub fn residual_attention_layer_with_global_track<'a, T : Borrow<Path<'a>>>(netw
 pub struct BilinearSelfAttention {
     pub full_dimension : usize,
     ///=1/sqrt(full_dimension)
-    pub scaling_factor : f32,
+    pub scaling_factor : f64,
     ///Interaction matrix (Q^T K) of dimensions full_dimension x full_dimension
     pub interaction_matrix : Tensor,
     ///Linear transform from full_dimension -> full_dimension whose effect will be modulated by the
@@ -264,7 +265,7 @@ pub struct BilinearSelfAttention {
 pub fn bilinear_self_attention<'a, T : Borrow<Path<'a>>>(network_path : T, 
                       full_dimension : usize) -> BilinearSelfAttention {
     let network_path = network_path.borrow();
-    let scaling_factor = 1.0f32 / (full_dimension as f32).sqrt();
+    let scaling_factor = 1.0f64 / (full_dimension as f64).sqrt();
     let dimensions = vec![full_dimension as i64, full_dimension as i64];
 
     let interaction_matrix = network_path.var("interaction_matrix", &dimensions, Init::KaimingUniform);

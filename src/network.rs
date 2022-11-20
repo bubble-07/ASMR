@@ -1,4 +1,4 @@
-use tch::{nn, nn::Init, nn::Module, Tensor, nn::Path, nn::Sequential, nn::LinearConfig};
+use tch::{nn, nn::Init, nn::linear, nn::Module, Tensor, nn::Path, nn::Sequential, nn::LinearConfig};
 use std::borrow::Borrow;
 use crate::params::*;
 use crate::neural_utils::*;
@@ -11,7 +11,7 @@ pub fn injector_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs : T) -> BiCon
     let vs = vs.borrow();
     let mut net = bi_concat_then_seq();
     let two_matrix_dim = 2 * params.get_flattened_matrix_dim();
-    net = net.add(simple_linear(
+    net = net.add(linear(
                      vs / "init_linear",
                      two_matrix_dim as i64,
                      params.num_feat_maps as i64,
@@ -32,9 +32,10 @@ pub fn policy_extraction_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs : T)
     let vs = vs.borrow();
     let mut net = tri_concat_then_seq();
     let three_feat_dim = 3 * params.num_feat_maps;
-    for i in 0..params.num_policy_extraction_layers {
-        net = net.add(linear_residual(vs / format!("layer_{}", i), three_feat_dim));
-    }
+    net = net.add(residual_block(
+                  vs / "residual_block",
+                  params.num_policy_extraction_layers,
+                  three_feat_dim));
 
     //Softmax is translation-invariant, so we don't need bias here
     let output_config = LinearConfig {
@@ -43,7 +44,7 @@ pub fn policy_extraction_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs : T)
         bias : false
     };
 
-    net = net.add(simple_linear(vs / "final_linear", three_feat_dim as i64, 1 as i64, 
+    net = net.add(linear(vs / "final_linear", three_feat_dim as i64, 1 as i64, 
                   output_config));
     net
 }
