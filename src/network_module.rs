@@ -1,6 +1,7 @@
 use tch::{nn, kind::Kind, nn::Init, nn::Module, Tensor, 
     nn::Path, nn::Sequential, nn::LinearConfig};
 use std::borrow::Borrow;
+use crate::tweakable_tensor::*;
 
 pub trait TriModule : std::fmt::Debug + Send {
     fn forward(&self, xs : &Tensor, ys : &Tensor, zs : &Tensor) -> Tensor;
@@ -139,28 +140,70 @@ impl Module for ResidualBlock {
     }
 }
 
+pub fn simple_linear_tweak<'a, T : Borrow<Path<'a>>>(network_path : T,
+                                                     base_simple_linear : &SimpleLinear)
+                                                    -> SimpleLinear {
+    let network_path = network_path.borrow();
+    let tweak_path = network_path / "tweak";
+
+    let in_out_dim = base_simple_linear.in_out_dim;
+    let config = base_simple_linear.config.clone();
+
+    //Unlike the base part, we initialize the tweak to always
+    //have non-zero components, because if they were all zero,
+    //we'd run into an immediate issue with the tweak weight
+    //and the weights here would be zero, which would lead to
+    //an inescapable saddle-point
+    let tweak_simple_linear = simple_linear(tweak_path, in_out_dim, Default::default());
+    
+    let tweak_weight = network_path.var("tweak_weight", &[], Init::Const(0.0));
+
+    let ws = TweakableTensor::tweaked(base_simple_linear.ws.bare_ref(), &tweak_weight, 
+                                      tweak_simple_linear.ws.bare());
+    let bs = if (base_simple_linear.bs.is_some()) {
+                Option::Some(TweakableTensor::tweaked(base_simple_linear.bs.as_ref().unwrap().bare_ref(),
+                             &tweak_weight, tweak_simple_linear.bs.unwrap().bare()))
+             } else {
+                 Option::None
+             };
+    SimpleLinear {
+        in_out_dim,
+        config,
+        ws,
+        bs
+    }
+}
+
 ///Our own implementation of a linear layer,
-///to remove the stupid trace operation
+///to remove the stupid transpose operation
+///in the case where the in and out dimensions are
+///the same.
 #[derive(Debug)]
 pub struct SimpleLinear {
-    pub ws : Tensor,
-    pub bs : Option<Tensor>,
+    in_out_dim : i64,
+    config : LinearConfig,
+    pub ws : TweakableTensor,
+    pub bs : Option<TweakableTensor>,
 }
 
 pub fn simple_linear<'a, T : Borrow<Path<'a>>>(network_path : T,
-                                        in_dim : i64,
-                                        out_dim : i64,
+                                        in_out_dim : i64,
                                         c : LinearConfig) -> SimpleLinear {
-    let neural_net_linear = nn::linear(network_path, in_dim, out_dim, c);
+    let config = c.clone();
+    let neural_net_linear = nn::linear(network_path, in_out_dim, in_out_dim, c);
     SimpleLinear {
-        ws : neural_net_linear.ws,
-        bs : neural_net_linear.bs,
+        in_out_dim,
+        config,
+        ws : TweakableTensor::from(neural_net_linear.ws),
+        bs : neural_net_linear.bs.map(|x| TweakableTensor::from(x)),
     }
 }
 
 impl Module for SimpleLinear {
     fn forward(&self, xs : &Tensor) -> Tensor {
-        xs.linear(&self.ws, self.bs.as_ref())
+        let ws = self.ws.get();
+        let bs = self.bs.as_ref().map(|x| x.get());
+        xs.linear(&ws, bs.as_ref())
     }
 }
 ///A single layer with a residual skip-connection

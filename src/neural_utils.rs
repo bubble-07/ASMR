@@ -1,9 +1,10 @@
 use tch::{nn, kind::Kind, nn::Init, nn::Module, Tensor, 
     nn::Path, nn::Sequential, nn::LinearConfig};
 use std::borrow::Borrow;
-use crate::network_module::{SimpleLinear, simple_linear};
+use crate::network_module::{SimpleLinear, simple_linear, simple_linear_tweak};
 use crate::params::*;
 use crate::peeling_states::*;
+use crate::tweakable_tensor::*;
 
 #[derive(Debug)]
 pub struct PeelStack {
@@ -43,19 +44,19 @@ impl PeelStack {
     }
 }
 
-pub fn peel_stack<'a, T : Borrow<Path<'a>>>(network_path : T, num_layers : usize, full_dimension : usize)
-                 -> PeelStack {
-
-    let network_path = network_path.borrow();  
+pub fn peel_stack<'a, T : Borrow<Path<'a>>>(network_path : T, 
+                                            main_net_stack : &ResidualAttentionStackWithGlobalTrack)
+                                            -> PeelStack {
+    let network_path = network_path.borrow();
 
     let mut layers = Vec::new();
-    for i in 0..num_layers {
+    for (i, main_net_layer) in main_net_stack.layers.iter().enumerate() {
         let layer_path = network_path / format!("layer{}", i);
-        let layer = peel_layer(layer_path, full_dimension);
+        let layer = peel_layer(layer_path, main_net_layer);
         layers.push(layer);
     }
     PeelStack {
-        layers
+        layers,
     }
 }
 
@@ -114,29 +115,25 @@ impl PeelLayer {
     pub fn peel_forward(&self, peel_layer_state : &PeelLayerState, x : &Tensor) -> (PeelTrackState, Tensor) {
         let (peel_track_state, after_attention) = self.read_only_attention.peel_forward(peel_layer_state, x);
         let after_linear = self.pre_linear.forward(&x);
-        let sum = 0.5f64 * (&after_linear + &after_attention);
+        let sum = &after_linear + &after_attention;
         let post_activation = sum.leaky_relu();
         let output = self.post_linear.forward(&post_activation) + x;
         (peel_track_state, output)
     }
 }
 
-pub fn peel_layer<'a, T : Borrow<Path<'a>>>(network_path : T, full_dimension : usize) -> PeelLayer {
+//A peel layer _is_ a tweak of a ResidualAttentionLayerWithGlobalTrack,
+//tweaking the "general matrix" functions
+pub fn peel_layer<'a, T : Borrow<Path<'a>>>(network_path : T, 
+                                            main_net_layer : &ResidualAttentionLayerWithGlobalTrack)
+                          -> PeelLayer {
     let network_path = network_path.borrow();
-    let read_only_attention = bilinear_self_attention(network_path / "read_only_attention", full_dimension);
-
-    let pre_linear = simple_linear(network_path / "pre_linear", full_dimension as i64, full_dimension as i64,
-                                Default::default());
-
-    //These are initialized to zero in the style of normalization-free ResNets
-    let post_linear_config = LinearConfig {
-        ws_init : Init::Const(0.0),
-        bs_init : Option::Some(Init::Const(0.0)),
-        bias : true
-    };
-
-    let post_linear = simple_linear(network_path / "post_linear", full_dimension as i64, full_dimension as i64,
-                                 post_linear_config);
+    let read_only_attention = bilinear_self_attention_tweak(network_path / "read_only_attention",
+                                                            &main_net_layer.bilinear_self_attention);
+    let pre_linear = simple_linear_tweak(network_path / "pre_linear",
+                                         &main_net_layer.pre_linear_general);
+    let post_linear = simple_linear_tweak(network_path / "post_linear",
+                                          &main_net_layer.post_linear_general);
     PeelLayer {
         read_only_attention,
         pre_linear,
@@ -197,15 +194,14 @@ impl ResidualAttentionLayerWithGlobalTrack {
         let general_inputs = general_inputs.reshape(&[leading_dim, f]);
         let after_attention_general = after_attention_general.reshape(&[leading_dim, f]);
         let after_linear = self.pre_linear_general.forward(&general_inputs);
-        let sum = 0.5f64 * (&after_linear + after_attention_general);
+        let sum = &after_linear + after_attention_general;
         let post_activation = sum.leaky_relu();
         let general_outputs = self.post_linear_general.forward(&post_activation) + general_inputs;
 
         let general_outputs = general_outputs.reshape(&[n, k - 1, f]);
 
         //Derive the global output
-        let sum_global = 0.5f64 * (&after_attention_global + 
-                                   &self.pre_linear_global.forward(&global_input));
+        let sum_global = &after_attention_global + &self.pre_linear_global.forward(&global_input);
         let post_activation_global = sum_global.leaky_relu();
         let output_global = self.post_linear_global.forward(&post_activation_global) + &global_input;
         let output_global = output_global.reshape(&[n, 1, f]);
@@ -221,9 +217,9 @@ pub fn residual_attention_layer_with_global_track<'a, T : Borrow<Path<'a>>>(netw
     let bilinear_self_attention = bilinear_self_attention(network_path / "bilinear_self_attention", full_dimension);
 
     let pre_linear_general = simple_linear(network_path / "pre_linear_general", 
-                                        full_dimension as i64, full_dimension as i64, Default::default());
+                                        full_dimension as i64, Default::default());
     let pre_linear_global = simple_linear(network_path / "pre_linear_global",
-                                        full_dimension as i64, full_dimension as i64, Default::default());
+                                        full_dimension as i64, Default::default());
 
     //These are initialized to zero in the style of normalization-free ResNets
     let post_linear_config = LinearConfig {
@@ -233,9 +229,9 @@ pub fn residual_attention_layer_with_global_track<'a, T : Borrow<Path<'a>>>(netw
     };
 
     let post_linear_general = simple_linear(network_path / "post_linear_general",
-                                         full_dimension as i64, full_dimension as i64, post_linear_config);
+                                         full_dimension as i64, post_linear_config);
     let post_linear_global = simple_linear(network_path / "post_linear_global",
-                                         full_dimension as i64, full_dimension as i64, post_linear_config);
+                                         full_dimension as i64, post_linear_config);
 
     ResidualAttentionLayerWithGlobalTrack {
         bilinear_self_attention,
@@ -252,14 +248,50 @@ pub struct BilinearSelfAttention {
     ///=1/sqrt(full_dimension)
     pub scaling_factor : f64,
     ///Interaction matrix (Q^T K) of dimensions full_dimension x full_dimension
-    pub interaction_matrix : Tensor,
+    pub interaction_matrix : TweakableTensor,
     ///Linear transform from full_dimension -> full_dimension whose effect will be modulated by the
     ///interaction matrix
-    pub value_extractor : Tensor,
+    pub value_extractor : TweakableTensor,
     ///Left-bias for the interaction matrix
-    pub left_bias : Tensor,
+    pub left_bias : TweakableTensor,
     ///Right-bias for the interaction matrix
-    pub right_bias : Tensor
+    pub right_bias : TweakableTensor
+}
+
+///A Bilinear self attention module whose parameters are a small tweak
+///from the parameters of another
+pub fn bilinear_self_attention_tweak<'a, T : Borrow<Path<'a>>>(network_path : T,
+                      base_attention : &BilinearSelfAttention) -> BilinearSelfAttention {
+    let network_path = network_path.borrow();
+    let tweak_path = network_path / "tweak";
+
+    let full_dimension = base_attention.full_dimension;
+    let scaling_factor = base_attention.scaling_factor;
+
+    let tweak_attention = bilinear_self_attention(tweak_path, full_dimension);
+
+    //Initialize tweak weight to zero in the interest of possibly keeping the
+    //variability in parameters around for later [if useful]
+    let tweak_weight = network_path.var("tweak_weight", &[], Init::Const(0.0));
+
+    let interaction_matrix = TweakableTensor::tweaked(base_attention.interaction_matrix.bare_ref(),
+                                                      &tweak_weight, tweak_attention.interaction_matrix.bare());
+    let value_extractor = TweakableTensor::tweaked(base_attention.value_extractor.bare_ref(),
+                                                   &tweak_weight, tweak_attention.value_extractor.bare());
+    let left_bias = TweakableTensor::tweaked(base_attention.left_bias.bare_ref(),
+                                             &tweak_weight, tweak_attention.left_bias.bare());
+
+    let right_bias = TweakableTensor::tweaked(base_attention.right_bias.bare_ref(),
+                                             &tweak_weight, tweak_attention.right_bias.bare());
+
+    BilinearSelfAttention {
+        full_dimension,
+        scaling_factor,
+        interaction_matrix,
+        value_extractor,
+        left_bias,
+        right_bias
+    }
 }
 
 pub fn bilinear_self_attention<'a, T : Borrow<Path<'a>>>(network_path : T, 
@@ -280,6 +312,11 @@ pub fn bilinear_self_attention<'a, T : Borrow<Path<'a>>>(network_path : T,
     let left_bias = network_path.var("left_bias", &bias_dimensions, bias_init);
     let right_bias = network_path.var("right_bias", &bias_dimensions, bias_init);
 
+    let interaction_matrix = TweakableTensor::from(interaction_matrix);
+    let value_extractor = TweakableTensor::from(value_extractor);
+    let left_bias = TweakableTensor::from(left_bias);
+    let right_bias = TweakableTensor::from(right_bias);
+
     BilinearSelfAttention {
         full_dimension,
         scaling_factor,
@@ -294,11 +331,15 @@ impl BilinearSelfAttention {
     ///Given the states of all the other peel layers and an x for activation,
     ///yields the state of x's track after running it through the attentional layer
     pub fn peel_forward(&self, peel_layer_state : &PeelLayerState, x : &Tensor) -> (PeelTrackState, Tensor) {
+        let left_bias = self.left_bias.get();
+        let right_bias = self.right_bias.get();
+        let value_extractor = self.value_extractor.get();
+
         //TODO: This is expensive, for some reason [due to matrix-multiplies]
         //make those faster!
         
         //N x F
-        let x_left_biased = x + &self.left_bias;
+        let x_left_biased = x + &left_bias;
         //N x 1 x F
         let x_left_biased = x_left_biased.unsqueeze(1);
 
@@ -321,12 +362,12 @@ impl BilinearSelfAttention {
 
 
         //Compute value for lookup from later peels -- N x F
-        let value = x.matmul(&self.value_extractor);
+        let value = x.matmul(&value_extractor);
 
         //The right-bias does enter in to updating the new interaction transforms
         //for the returned peel track state, tho
         //N x F
-        let x_right_biased = x + &self.right_bias;
+        let x_right_biased = x + &right_bias;
         //N x F x 1
         let x_right_biased = x_right_biased.unsqueeze(2);
         let scaled_interaction_matrix = &peel_layer_state.scaled_interaction_matrix;
@@ -345,13 +386,17 @@ impl BilinearSelfAttention {
     //xs : N x K x F
     //Computes the PeelLayerState from the input tensor
     pub fn forward_to_peel_state(&self, xs : &Tensor) -> PeelLayerState {
-        //N x F x K
-        let xs_right_biased = (xs + &self.right_bias).transpose(1, 2);
+        let right_bias = self.right_bias.get();
+        let interaction_matrix = self.interaction_matrix.get();
+        let value_extractor = self.value_extractor.get();
 
-        let scaled_interaction_matrix = self.scaling_factor * &self.interaction_matrix;
+        //N x F x K
+        let xs_right_biased = (xs + &right_bias).transpose(1, 2);
+
+        let scaled_interaction_matrix = self.scaling_factor * &interaction_matrix;
 
         //N x K x F
-        let values = xs.matmul(&self.value_extractor);
+        let values = xs.matmul(&value_extractor);
 
         //N x F x K
         let interactions = scaled_interaction_matrix.matmul(&xs_right_biased);
@@ -364,8 +409,10 @@ impl BilinearSelfAttention {
     }
     //Computes the activation from the input tensor and the peel layer state
     pub fn forward_from_peel_state(&self, xs_forward : &Tensor, peel_layer_state : &PeelLayerState) -> Tensor {
+        let left_bias = self.left_bias.get();
+
         //N x K x F
-        let xs_left_biased = xs_forward + &self.left_bias;
+        let xs_left_biased = xs_forward + &left_bias;
 
         //N x K x K
         let pre_softmax_weights = xs_left_biased.matmul(&peel_layer_state.interactions);

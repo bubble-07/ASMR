@@ -65,7 +65,8 @@ pub fn root_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs : T) -> ResidualA
 ///
 ///This network is used during playouts to determine the next move after addition of a
 ///new matrix product.
-pub fn peel_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs : T) -> PeelStack { 
-    peel_stack(vs, params.num_main_net_layers, params.num_feat_maps)
+pub fn peel_net<'a, T : Borrow<Path<'a>>>(vs : T, 
+                    root_net : &ResidualAttentionStackWithGlobalTrack) -> PeelStack { 
+    peel_stack(vs, root_net)
 }
 

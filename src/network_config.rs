@@ -37,7 +37,7 @@ impl NetworkConfig {
     pub fn new(params : &Params, vs : &nn::Path) -> NetworkConfig {
         let injector_net = injector_net(params, vs / "injector");
         let root_net = root_net(params, vs / "root");
-        let peel_net = peel_net(params, vs / "peel");
+        let peel_net = peel_net(vs / "peel", &root_net);
         let policy_extraction_net = policy_extraction_net(params, vs / "policy_extractor");
         NetworkConfig {
             injector_net,

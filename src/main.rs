@@ -3,6 +3,7 @@
 #![allow(unused_imports)]
 #![allow(unused_parens)]
 
+mod tweakable_tensor;
 mod peeling_states;
 mod bunched_rollout;
 mod visit_logit_matrices;
