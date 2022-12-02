@@ -24,7 +24,7 @@ mod training_examples;
 mod network_rollout;
 mod batch_split;
 
-use tch::{kind, Tensor, nn::Sgd, nn::OptimizerConfig, Cuda};
+use tch::{kind, Tensor, nn::Adam, nn::OptimizerConfig, Cuda};
 use std::fs;
 use std::time::Duration;
 use std::time::Instant;
@@ -468,15 +468,15 @@ fn train_command(params : Params, network_config_path : &str, training_data_path
                 params.held_out_validation_batches,
             );
 
-            let sgd = Sgd {
+            let adam = Adam {
                 wd : params.weight_decay_factor,
-                ..Sgd::default()
+                ..Adam::default()
             };
-            let mut opt = sgd.build(&vs, params.train_step_size).unwrap();
+            let mut opt = adam.build(&vs, params.train_step_size).unwrap();
             let mut best_validation_loss = f64::INFINITY;
             loop {
                 let (train_loss, validation_loss) = network_config.run_training_epoch(&params, &batch_split_training_examples, 
-                                                                   &mut opt, device, &mut rng);
+                                                                   &mut opt, device, &mut rng, &vs);
                 let current_time = SystemTime::now();
                 println!("train loss for the epoch: {} validation loss: {} current time: {:?}", 
                          train_loss, validation_loss, current_time);

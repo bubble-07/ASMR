@@ -18,6 +18,12 @@ use std::fmt;
 pub struct VisitLogitMatrices(pub Tensor);
 
 impl VisitLogitMatrices {
+    pub fn expand(self, R : usize) -> Self {
+        let R = R as i64;
+        let matrices = self.0;
+        let expanded_matrices = matrices.expand(&[R, -1, -1], false);
+        VisitLogitMatrices(expanded_matrices)
+    }
     pub fn split(self, split_sizes : &[i64]) -> Vec<VisitLogitMatrices> {
         let mut visit_logit_matrices = self.0.split_with_sizes(split_sizes, 0);
         visit_logit_matrices.drain(..).map(|x| VisitLogitMatrices(x)).collect()
@@ -57,7 +63,7 @@ impl VisitLogitMatrices {
     //row and column, treating the rest of the matrix as one block whose
     //contributions are pooled, but re-normalized to remove any bias from
     //this extra fake element.
-    pub fn get_peel_loss(&self, target_policy : &Tensor, label_smoothing_factor : f64) -> Tensor {
+    pub fn get_peel_loss(&self, target_policy : &Tensor) -> Tensor {
         let VisitLogitMatrices(child_visit_logits) = &self;
 
         let s = child_visit_logits.size();
@@ -96,23 +102,24 @@ impl VisitLogitMatrices {
         let all_policy = all_policy.put(&batch_indices, &policy_submatrix_sums, false);
         
         //With that info, output a loss
-        let unnormalized_loss = Self::softmax_cross_entropy_with_logits(&all_logits, &all_policy,
-                                                                        label_smoothing_factor);
+        let unnormalized_loss = Self::softmax_cross_entropy_with_logits(&all_logits, &all_policy);
         let normalization_factor = (((2 * k_plus_t - 1) as f64) / ((2 * k_plus_t) as f64));
         let loss = normalization_factor * unnormalized_loss;
         loss
     }
 
-    pub fn get_loss(&self, target_policy : &Tensor, label_smoothing_factor : f64) -> Tensor {
+    pub fn get_loss(&self, target_policy : &Tensor) -> Tensor {
         let VisitLogitMatrices(child_visit_logits) = &self;
-        Self::softmax_cross_entropy_with_logits(child_visit_logits, target_policy,
-                                                label_smoothing_factor)
+        Self::softmax_cross_entropy_with_logits(child_visit_logits, target_policy)
     }
 
     //Assuming the first dimension is the batch dimension, compute cross-entropy with logits
     //normalized by the number of samples in the batch.
-    fn softmax_cross_entropy_with_logits(logits : &Tensor, target_policy : &Tensor,
-                                         label_smoothing_factor : f64) -> Tensor {
+    fn softmax_cross_entropy_with_logits(logits : &Tensor, target_policy : &Tensor) -> Tensor {
+
+        let min_logit_value = f64::from(logits.min());
+        let max_logit_value = f64::from(logits.max());
+
         let r = logits.size()[0];
         let total_size = logits.size().drain(..).fold(1, |a, b| a * b);
         let remainder_size = total_size / r;
@@ -128,13 +135,7 @@ impl VisitLogitMatrices {
         let flattened_log_softmaxed = one_over_r * log_softmaxed.reshape(&flat_dim);
         let flattened_target_policy = target_policy.reshape(&flat_dim);
 
-        //Smooth the target policy
-        let uniform_element_value = 1.0f64 / (remainder_size as f64);
-        let smoothed_flattened_policy = (1.0f64 - label_smoothing_factor) * flattened_target_policy +
-                                        (label_smoothing_factor * uniform_element_value);
-
-
-        let inner_product = smoothed_flattened_policy.dot(&flattened_log_softmaxed);
+        let inner_product = flattened_target_policy.dot(&flattened_log_softmaxed);
 
         -inner_product
     }
@@ -166,7 +167,7 @@ impl VisitLogitMatrices {
 
         (left_indices, right_indices)
     }
-    //Masks out the chosen moves from the matrices with a -inf
+    //Masks out the chosen moves from the matrices with the lowest finite float
     pub fn mask_chosen(&mut self, left_indices : &Tensor, right_indices : &Tensor) {
         let _guard = no_grad_guard();
         let r = self.get_num_matrices();
@@ -189,7 +190,7 @@ impl VisitLogitMatrices {
 
 
         let mut values = Tensor::zeros(&[r], (Kind::Float, matrices.device()));
-        let values = values.fill_(f64::NEG_INFINITY);
+        let values = values.fill_(f32::MIN as f64);
 
         let result = matrices.put(&offsets, &values, false);
 

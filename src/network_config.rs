@@ -124,7 +124,7 @@ impl NetworkConfig {
                               training_examples : &BatchSplitTrainingExamples, 
                               opt : &mut Optimizer,
                               device : Device,
-                              rng : &mut R
+                              rng : &mut R, vs : &tch::nn::VarStore
                               ) -> (f64, f64) { //return value is training loss, validation loss
 
         let mut total_train_loss = 0f64;
@@ -140,6 +140,7 @@ impl NetworkConfig {
             println!("Iter loss: {}", iter_loss_float);
 
             opt.backward_step(&iter_loss);
+
             total_train_loss += iter_loss_float / (num_iters as f64);
         }
 

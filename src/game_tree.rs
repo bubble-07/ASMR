@@ -61,10 +61,12 @@ impl RolloutStrategy {
     pub fn complete_rollouts<R : Rng + ?Sized>(self, game_state : GameState, 
                                               network_config : &NetworkConfig, rng : &mut R) -> Vec<f32> {
         if let RolloutStrategy::NetworkConfig = self {
-            let rollout_states = RolloutStates::from_single_game_state(game_state);
-            //TODO: Expand the rollout state size by picking every subsequent option
+            let single_rollout_state = RolloutStates::from_single_game_state(game_state);
             let mut network_rollout = NetworkRolloutState::from_rollout_states(network_config, 
-                                                                               rollout_states);
+                                                                               single_rollout_state);
+            //Make the network rollout expand to include every possible next move
+            network_rollout = network_rollout.perform_all_moves(network_config);
+
             while (network_rollout.rollout_states.remaining_turns > 0) {
                 network_rollout = network_rollout.step(network_config);
             }

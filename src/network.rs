@@ -37,15 +37,24 @@ pub fn policy_extraction_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs : T)
                   params.num_policy_extraction_layers,
                   three_feat_dim));
 
-    //Softmax is translation-invariant, so we don't need bias here
+    //Linear transformation prior to squishing the output logits to fall
+    //within a given range. Improves numerical stability over having
+    //unsquooshed logits, since things quickly can get outta hand in that case,
+    //especially as the main net and the peel net compete to get the
+    //right assigned probabilities.
     let output_config = LinearConfig {
         ws_init : Init::KaimingUniform,
-        bs_init : Option::None,
-        bias : false
+        bs_init : Option::Some(Init::Const(0.0)),
+        bias : true,
     };
 
     net = net.add(linear(vs / "final_linear", three_feat_dim as i64, 1 as i64, 
                   output_config));
+
+    //Quasi-arbitrary constant, but it doesn't really matter - e^30 should be
+    //more than good enough for anyone.
+    net = net.add(tch::nn::func(|x| 30 * x.atan()));
+
     net
 }
 

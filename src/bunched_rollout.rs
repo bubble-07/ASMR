@@ -126,8 +126,7 @@ impl BundleState {
                  weight, bundle_tail, child_visit_probabilities) = carryforwards;
 
             let network_visit_logits = &network_rollout_state.child_visit_logits;
-            let peel_loss = network_visit_logits.get_peel_loss(&child_visit_probabilities,
-                                                               params.label_smoothing_factor);
+            let peel_loss = network_visit_logits.get_peel_loss(&child_visit_probabilities);
             total_loss += weight * peel_loss;
             
             let result_state = BundleState {
@@ -211,8 +210,7 @@ pub fn get_loss_for_playout_bundles(network_config : &NetworkConfig, params : &P
             //Compute the base loss, and add it to our total
             let network_visit_logits = &network_rollout_state.child_visit_logits;
             let actual_visit_probabilities = &bundle.child_visit_probabilities[0];
-            let base_loss = network_visit_logits.get_loss(actual_visit_probabilities,
-                                                          params.label_smoothing_factor);
+            let base_loss = network_visit_logits.get_loss(actual_visit_probabilities);
             total_loss += weight * base_loss;
 
             //Get the newly-minted bundle to package

@@ -31,11 +31,9 @@ impl TweakableTensor {
             },
         }
     }
-    pub fn tweaked(base_tensor : &Tensor, tweak_weight : &Tensor,
-                   tweak : Tensor) -> TweakableTensor {
+    pub fn tweaked(base_tensor : &Tensor, tweak : Tensor) -> TweakableTensor {
         TweakableTensor::Tweaked(TweakedTensor {
             base_tensor : base_tensor.shallow_clone(),
-            tweak_weight : tweak_weight.shallow_clone(),
             tweak
         })
     }
@@ -52,13 +50,12 @@ impl TweakableTensor {
 #[derive(Debug)]
 pub struct TweakedTensor {
     pub base_tensor : Tensor,
-    pub tweak_weight : Tensor,
     pub tweak : Tensor,
 }
 
 impl TweakedTensor {
     pub fn get(&self) -> Tensor {
-        &self.base_tensor + (&self.tweak_weight * &self.tweak)
+        &self.base_tensor + &self.tweak
     }
 }
 

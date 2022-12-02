@@ -47,6 +47,52 @@ pub struct NetworkRolloutState {
 }
 
 impl NetworkRolloutState {
+    ///Assuming that this rollout state currently only contains one rollout,
+    ///expands it to rollout states which cover all of the subsequent
+    ///next possible moves
+    pub fn perform_all_moves(self, network_config : &NetworkConfig) -> Self {
+        let device = self.rollout_states.matrices.device();
+        let num_matrices = self.rollout_states.get_num_matrices();
+        let num_children = num_matrices * num_matrices;
+
+        //Construct the left/right indices tensors
+        let left_indices = Tensor::arange(num_matrices, (Kind::Int64, device));
+        let left_indices = left_indices.repeat(&[num_matrices]);
+
+        let right_indices = Tensor::arange(num_matrices, (Kind::Int64, device));
+        let right_indices = right_indices.repeat_interleave_self_int(num_matrices, Option::None,
+                                                                     Option::Some(num_children));
+
+        //Expand and perform moves
+        let result = self.expand(num_children as usize);
+        let result = result.manual_step(&network_config, &left_indices, &right_indices);
+        result
+    }
+
+    //Expands a single-rollout NetworkRolloutState to have R identical rollouts
+    pub fn expand(self, R : usize) -> Self {
+        let _guard = no_grad_guard();
+
+        let rollout_states = self.rollout_states.expand(R);
+        let peeling_states = self.peeling_states.expand(R);
+        let child_visit_logits = self.child_visit_logits.expand(R);
+
+        let R = R as i64;
+
+        let output_activations = self.output_activations.expand(&[-1, R, -1], false);
+        let global_output_activation = self.global_output_activation.expand(&[R, -1], false);
+        let transformed_flattened_targets = self.transformed_flattened_targets
+                                                .expand(&[R, -1], false);
+
+        NetworkRolloutState {
+            rollout_states,
+            peeling_states,
+            output_activations,
+            global_output_activation,
+            child_visit_logits,
+            transformed_flattened_targets,
+        }
+    }
     ///Splits to a collection of network rollout states
     ///where each rollout state object contains the specified number
     ///of samples [according to split_sizes]

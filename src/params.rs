@@ -55,8 +55,6 @@ pub struct Params {
     pub num_synthetic_training_data_files : usize,
     ///Weight decay factor for training. (Helps regularize the model)
     pub weight_decay_factor : f64,
-    ///Label smoothing factor for training. (Helps regularize the model)
-    pub label_smoothing_factor : f64,
     ///Batch size for training
     pub batch_size : usize,
     ///Number of batches to hold out of the training set for validation

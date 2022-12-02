@@ -55,6 +55,16 @@ impl PeelTrackStates {
 }
 
 impl PeelLayerStates {
+    pub fn expand(self, R : usize) -> PeelLayerStates {
+        let R = R as i64;
+        let values = self.values.expand(&[-1, R, -1, -1], false);
+        let interactions = self.interactions.expand(&[-1, R, -1, -1], false);
+        PeelLayerStates {
+            values,
+            interactions,
+            scaled_interaction_matrices : self.scaled_interaction_matrices,
+        }
+    }
     ///Splits to a collection of peel layer states with
     ///the specified number of samples for each
     pub fn split(self, split_sizes : &[i64]) -> Vec<PeelLayerStates> {

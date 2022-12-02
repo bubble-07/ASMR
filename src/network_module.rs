@@ -109,6 +109,28 @@ pub fn tri_concat_then_seq() -> TriConcatThenSequential {
     }
 }
 
+///A layer which takes _matrices_ as input and yields
+///a bilinear-feature-mapped output of the form
+///A M B for trainable matries A and B. The input
+///and the output are both flattened matrices,
+///and both the input and output size must be
+///perfect squares.
+pub struct BilinearMatrixSketch {
+    //sqrt(out_dim) x sqrt(in_dim)
+    pub left_matrix : Tensor,
+    //sqrt(in_dim) x sqrt(out_dim)
+    pub right_matrix : Tensor,
+    pub sqrt_in_dim : usize,
+    pub sqrt_out_dim : usize,
+    pub in_dim : usize,
+    pub out_dim : usize,
+}
+
+pub fn bilinear_matrix_sketch<'a, T : Borrow<Path<'a>>>(network_path : T,
+                             in_dim : usize, out_dim : usize) -> BilinearMatrixSketch {
+    panic!();
+}
+
 ///A block of layers, all with residual skip-connections
 #[derive(Debug)]
 pub struct ResidualBlock {
@@ -155,14 +177,12 @@ pub fn simple_linear_tweak<'a, T : Borrow<Path<'a>>>(network_path : T,
     //and the weights here would be zero, which would lead to
     //an inescapable saddle-point
     let tweak_simple_linear = simple_linear(tweak_path, in_out_dim, Default::default());
-    
-    let tweak_weight = network_path.var("tweak_weight", &[], Init::Const(0.0));
 
-    let ws = TweakableTensor::tweaked(base_simple_linear.ws.bare_ref(), &tweak_weight, 
-                                      tweak_simple_linear.ws.bare());
+    let ws = TweakableTensor::tweaked(base_simple_linear.ws.bare_ref(),
+                                      0.0 * tweak_simple_linear.ws.bare());
     let bs = if (base_simple_linear.bs.is_some()) {
                 Option::Some(TweakableTensor::tweaked(base_simple_linear.bs.as_ref().unwrap().bare_ref(),
-                             &tweak_weight, tweak_simple_linear.bs.unwrap().bare()))
+                             0.0 * tweak_simple_linear.bs.unwrap().bare()))
              } else {
                  Option::None
              };
