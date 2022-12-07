@@ -19,9 +19,7 @@ pub struct Params {
     pub num_feat_maps : usize,
     ///Number of layers for the main net with attention layers
     pub num_main_net_layers : usize,
-    ///Number of layers for injecting the (source matrix, target matrix) pairings into the network
-    pub num_injection_layers : usize,
-    ///Number of layers for extracting the policy from (single, global) pairings
+    ///Number of layers for extracting the policy from (single, single, global) triples
     pub num_policy_extraction_layers : usize,
     ///Standard deviation in log-space for generating random matrix entries
     pub log_normal_std_dev : f64,

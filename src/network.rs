@@ -4,23 +4,24 @@ use crate::params::*;
 use crate::neural_utils::*;
 use crate::network_module::*;
 
-///BiModule that takes a flattened matrix (dimension FLATTENED_MATRIX_DIM)
+///Module that takes a flattened matrix (dimension FLATTENED_MATRIX_DIM)
 ///for an input and a flattened matrix (dimension FLATTENED_MATRIX_DIM) for a target
 ///to descriptors of NUM_FEAT_MAPS size.
-pub fn injector_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs : T) -> BiConcatThenSequential {
+pub fn injector_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs : T) -> Sequential {
     let vs = vs.borrow();
-    let mut net = bi_concat_then_seq();
-    let two_matrix_dim = 2 * params.get_flattened_matrix_dim();
+    let mut net = nn::seq();
+    let matrix_dim = params.get_flattened_matrix_dim();
+    //net = net.add(bilinear_matrix_sketch(vs / "init_bilinear",
+    //                                     matrix_dim as usize,
+    //                                     params.num_feat_maps
+    //             ));
+
     net = net.add(linear(
-                     vs / "init_linear",
-                     two_matrix_dim as i64,
-                     params.num_feat_maps as i64,
-                     Default::default()
-                  ));
-    net = net.add(residual_block(
-                  vs / "residual_block",
-                  params.num_injection_layers,
-                  params.num_feat_maps));
+                         vs / "init_linear",
+                         matrix_dim as i64,
+                         params.num_feat_maps as i64,
+                         Default::default()
+                 ));
     net
 }
 

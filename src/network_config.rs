@@ -22,8 +22,9 @@ use core::iter::Sum;
 ///M : matrix (flattened) dims
 ///F : feature dims
 pub struct NetworkConfig {
-    ///Injection network, taking matrix, target pairs, and turning them into initial features -- M x M -> F
-    pub injector_net : BiConcatThenSequential,
+    ///Injection network, taking input matrices in the initial set or the target,
+    ///and turning those into initial features -- M -> F
+    pub injector_net : Sequential,
     ///Root network - a stack of attentional residual layers interspersed with RELU. K x F -> (K + 1) x F
     pub root_net : ResidualAttentionStackWithGlobalTrack,
     ///Peel network
@@ -47,37 +48,29 @@ impl NetworkConfig {
         }
     }
 
-    pub fn get_single_embedding(&self, flattened_transformed_matrices : &Tensor, 
-                                transformed_flattened_targets : &Tensor)
+    pub fn get_single_embedding(&self, flattened_transformed_matrices : &Tensor)
                             -> Tensor {
-        self.injector_net.forward(flattened_transformed_matrices, &transformed_flattened_targets)
+        self.injector_net.forward(flattened_transformed_matrices)
     }
 
-    pub fn get_single_embeddings(&self, flattened_transformed_matrix_sets : &[Tensor], 
-                                 transformed_flattened_targets : &Tensor)
+    pub fn get_single_embeddings(&self, flattened_transformed_matrix_sets : &[Tensor])
                             -> Vec<Tensor> {
         flattened_transformed_matrix_sets.iter()
-            .map(|x| self.get_single_embedding(x, transformed_flattened_targets))
+            .map(|x| self.get_single_embedding(x))
             .collect()
     }
 
+    ///Given single embeddings, the last of which is the matrix target
+    ///[all others are matrices in the starting set]
     ///Returns: pre-activations for each layer, 
     ///followed by the global output embedding and output embeddings for each matrix
     ///in the initial matrix set
     pub fn get_main_net_outputs(&self, single_embeddings : &[Tensor]) -> (Vec<Tensor>, Tensor, Vec<Tensor>) {
-        let k = single_embeddings.len();
-
-        let mut averaged_embedding : Tensor = Iterator::sum(single_embeddings.iter());
-        averaged_embedding *= (1.0f32 / (k as f32));
-
-        let mut main_net_inputs = Vec::new();
-        for single_embedding in single_embeddings {
-            main_net_inputs.push(single_embedding.shallow_clone());
-        }
-        main_net_inputs.push(averaged_embedding);
+        let k_plus_one = single_embeddings.len();
+        let k = k_plus_one - 1;
 
         //Nx(K+1)xF
-        let main_net_inputs = Tensor::stack(&main_net_inputs, 1);
+        let main_net_inputs = Tensor::stack(single_embeddings, 1);
 
         //L x Nx(K+1)xF, global output in the last place of each feature map
         let mut main_activations = self.root_net.forward(&main_net_inputs); 

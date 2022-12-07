@@ -40,10 +40,6 @@ pub struct NetworkRolloutState {
     ///Logits for child visit tensors
     ///R x (k + t) x (k + t)
     pub child_visit_logits : VisitLogitMatrices,
-
-    ///Transformed added targets
-    ///R x M
-    pub transformed_flattened_targets : Tensor,
 }
 
 impl NetworkRolloutState {
@@ -81,8 +77,6 @@ impl NetworkRolloutState {
 
         let output_activations = self.output_activations.expand(&[-1, R, -1], false);
         let global_output_activation = self.global_output_activation.expand(&[R, -1], false);
-        let transformed_flattened_targets = self.transformed_flattened_targets
-                                                .expand(&[R, -1], false);
 
         NetworkRolloutState {
             rollout_states,
@@ -90,7 +84,6 @@ impl NetworkRolloutState {
             output_activations,
             global_output_activation,
             child_visit_logits,
-            transformed_flattened_targets,
         }
     }
     ///Splits to a collection of network rollout states
@@ -101,19 +94,17 @@ impl NetworkRolloutState {
         let peeling_states = self.peeling_states.split(split_sizes);
         let child_visit_logits = self.child_visit_logits.split(split_sizes);
 
-        let transformed_flattened_targets = self.transformed_flattened_targets.split_with_sizes(split_sizes, 0);         
         let output_activations = self.output_activations.split_with_sizes(split_sizes, 1);
         let global_output_activation = self.global_output_activation.split_with_sizes(split_sizes, 0);
 
-        zip(zip(zip(zip(zip(rollout_states, peeling_states), child_visit_logits),
-            transformed_flattened_targets), output_activations), global_output_activation)
-        .map(|(((((rollout_states, peeling_states), child_visit_logits),
-            transformed_flattened_targets), output_activations), global_output_activation)|
+        zip(zip(zip(zip(rollout_states, peeling_states), child_visit_logits),
+            output_activations), global_output_activation)
+        .map(|((((rollout_states, peeling_states), child_visit_logits),
+            output_activations), global_output_activation)|
             NetworkRolloutState {
                 rollout_states,
                 peeling_states,
                 child_visit_logits,
-                transformed_flattened_targets,
                 output_activations,
                 global_output_activation
             }
@@ -132,21 +123,18 @@ impl NetworkRolloutState {
         let mut output_activations = Vec::new();
         let mut global_output_activation = Vec::new();
         let mut child_visit_logits = Vec::new();
-        let mut transformed_flattened_targets = Vec::new();
         for state in states.drain(..) {
             rollout_states.push(state.rollout_states);
             peeling_states.push(state.peeling_states);
             output_activations.push(state.output_activations);
             global_output_activation.push(state.global_output_activation);
             child_visit_logits.push(state.child_visit_logits);
-            transformed_flattened_targets.push(state.transformed_flattened_targets);
         }
         let rollout_states = RolloutStates::merge(rollout_states);
         let peeling_states = PeelLayerStates::merge(peeling_states);
         let output_activations = Tensor::concat(&output_activations, 1);
         let global_output_activation = Tensor::concat(&global_output_activation, 0);
         let child_visit_logits = VisitLogitMatrices::merge(child_visit_logits);
-        let transformed_flattened_targets = Tensor::concat(&transformed_flattened_targets, 0);
 
         NetworkRolloutState {
             rollout_states,
@@ -154,7 +142,6 @@ impl NetworkRolloutState {
             output_activations,
             global_output_activation,
             child_visit_logits,
-            transformed_flattened_targets,
         }
     }
     pub fn step(self, network_config : &NetworkConfig) -> Self {
@@ -180,11 +167,9 @@ impl NetworkRolloutState {
         child_visit_logits.mask_chosen(left_indices, right_indices);
         
         //Derive the pre-activation for a new peel track
-        let transformed_flattened_targets = &self.transformed_flattened_targets;
 
         //R x F
-        let added_single_embeddings = network_config.injector_net.forward(&flattened_transformed_added_matrices,
-                                                                          transformed_flattened_targets);
+        let added_single_embeddings = network_config.injector_net.forward(&flattened_transformed_added_matrices);
         
         //Update to the new layer activation peeling states by
         //"peeling forward" through the peel network, also yielding the
@@ -240,7 +225,6 @@ impl NetworkRolloutState {
             output_activations,
             global_output_activation : self.global_output_activation,
             child_visit_logits,
-            transformed_flattened_targets : self.transformed_flattened_targets,
         }
     }
 
@@ -253,15 +237,17 @@ impl NetworkRolloutState {
         //Using asinh for mapping due to having logarithmic growth
         //with respect to the absolute value of the argument, which is roughly
         //what we'd desire for normalizing the effects of repeated matrix multiplication
-        let flattened_transformed_matrix_sets = rollout_states.matrices
+        let mut flattened_transformed_matrix_sets = rollout_states.matrices
                                                 .reshape(&[r, k_plus_t, m * m])
                                                 .asinh().detach()
                                                 .unbind(1);
         let transformed_flattened_targets = rollout_states.flattened_targets.asinh().detach();
 
+        //Concat on the targets, since the main net will expect the target to be the last matrix
+        flattened_transformed_matrix_sets.push(transformed_flattened_targets);
 
-        let single_embeddings = network_config.get_single_embeddings(&flattened_transformed_matrix_sets,
-                                                                     &transformed_flattened_targets);
+
+        let single_embeddings = network_config.get_single_embeddings(&flattened_transformed_matrix_sets);
 
         let (layer_activations, global_output_activation, output_activations) =
             network_config.get_main_net_outputs(&single_embeddings);
@@ -280,7 +266,6 @@ impl NetworkRolloutState {
             output_activations,
             global_output_activation,
             child_visit_logits,
-            transformed_flattened_targets,
         }
     }
 }
