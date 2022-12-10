@@ -26,6 +26,7 @@ mod batch_split;
 
 use tch::{kind, Tensor, nn::Adam, nn::OptimizerConfig, Cuda};
 use std::fs;
+use std::sync::mpsc::*;
 use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
@@ -34,10 +35,13 @@ use crate::game_state::*;
 use crate::params::*;
 use crate::game_tree::*;
 use crate::training_examples::*;
+use crate::synthetic_data::*;
 use crate::network_config::*;
 use crate::batch_split_training_examples::*;
 use std::str::from_utf8;
 use std::path::Path;
+use rayon::*;
+use rayon::iter::*;
 
 fn print_help() {
     println!("usage:
@@ -407,26 +411,73 @@ fn gen_synthetic_training_data_files_command(params : Params, training_data_outp
 }
 
 fn gen_synthetic_training_data_file_command(params : &Params, training_data_output_path : &str) {
-    let mut rng = rand::thread_rng();
-    let mut builder = TrainingExamplesBuilder::new(params);
+    //A bunch of worker threads will send AnnotatedGamePaths
+    //to a single writer thread which is responsible for
+    //collating responses into a training-examples builder.
+    let (sender, receiver) = channel(); 
 
-    for _ in 0..params.num_synthetic_training_games {
-        let game_path = params.generate_random_game_path(&mut rng);
+    let builder = TrainingExamplesBuilder::new(params);
+    let builder_thread_handle = std::thread::spawn(move || {
+        let mut builder = builder;
+        loop {
+            let maybe_game_path = receiver.recv();
+            match (maybe_game_path) {
+                Result::Ok(Option::Some(game_path)) => {
+                    builder.add_annotated_game_path(game_path)
+                },
+                Result::Ok(Option::None) => {
+                    //Last element, cap it off
+                    return builder;
+                },
+                Result::Err(_) => {
+                    //Other end must've hung up, cap it off
+                    return builder;
+                },
+            }
+        }
+    });
+
+    (0..params.num_synthetic_training_games).into_par_iter()
+    .map(|_| {
+        let mut rng = rand::thread_rng();
+         let game_path = params.generate_random_game_path(&mut rng);
         let annotated_game_path = game_path.annotate_path();
-        builder.add_annotated_game_path(annotated_game_path);
-    }
-    let training_examples = builder.build();
 
-    let output_path = Path::new(training_data_output_path);
-    let maybe_save_result = training_examples.save(&output_path);
-    match (maybe_save_result) {
-        Result::Ok(_) => {
-            println!("Successfully generated and saved synthetic training data");
-        },
-        Result::Err(err) => {
-            eprintln!("Failed to write synthetic training data: {}", err);
+        //Change coordinates so the most important components come first
+        let orthonormal_matrix = annotated_game_path.derive_orthonormal_basis_change();
+        let annotated_game_path = annotated_game_path.apply_orthonormal_basis_change(orthonormal_matrix.view());
+
+        annotated_game_path
+    })
+    .for_each_with(sender.clone(), |s, x| {
+        s.send(Option::Some(x)).unwrap();
+    });
+
+    //Indicate that we've sent all the items we plan to
+    sender.send(Option::None).unwrap();
+
+    //Join the builder thread back to the main thread
+    let maybe_builder = builder_thread_handle.join();
+    match (maybe_builder) {
+        Result::Ok(builder) => {
+            let training_examples = builder.build();
+
+            let output_path = Path::new(training_data_output_path);
+            let maybe_save_result = training_examples.save(&output_path);
+            match (maybe_save_result) {
+                Result::Ok(_) => {
+                    println!("Successfully generated and saved synthetic training data");
+                },
+                Result::Err(err) => {
+                    eprintln!("Failed to write synthetic training data: {}", err);
+                }
+            }
+        }
+        Result::Err(_) => {
+            println!("Failed to join builder thread");
         }
     }
+
 }
 
 fn distill_game_data_command(params : Params, game_data_root : &str, training_data_output_path : &str) {

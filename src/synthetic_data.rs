@@ -5,6 +5,9 @@ use crate::matrix_set::*;
 use crate::array_utils::*;
 use rand::Rng;
 use rand::seq::SliceRandom;
+extern crate ndarray_linalg;
+use ndarray_linalg::svd::*;
+use ndarray_linalg::Norm;
 
 #[derive(Clone, Hash, PartialEq, Eq)]
 pub struct GamePathNode {
@@ -29,6 +32,117 @@ pub struct AnnotatedGamePath {
     pub matrix_set : MatrixSet,
     pub target_matrix : Array2<f32>,
     pub nodes : Vec<AnnotatedGamePathNode>
+}
+
+impl AnnotatedGamePathNode {
+    pub fn apply_orthonormal_basis_change(self, Q : ArrayView2<f32>) -> Self {
+        let added_matrix = Q.t().dot(&self.added_matrix).dot(&Q);
+        Self {
+            added_matrix,
+            ..self
+        }
+    }
+}
+
+struct OrthonormalVectorSet(pub Vec<Array1<f32>>);
+
+impl OrthonormalVectorSet {
+    pub fn add_to_span(&mut self, mut to_add : Array1<f32>) {
+        let min_length = 1e-2;
+
+        let init_norm = to_add.norm_l2();
+        if (init_norm < min_length) {
+            //Not going to be a useful vector
+            return;
+        }
+        //Normalize to_add
+        to_add *= 1.0f32 / init_norm;
+
+        //Orthogonalize
+        for existing_vector in &self.0 {
+            //Subtract off projection of to_add onto the existing
+            let dot_product = to_add.dot(existing_vector);
+            let projection = dot_product * existing_vector;
+            to_add -= &projection;
+        }
+        //Make sure that the vector we're adding has a nonzero norm.
+        //Otherwise, we'll skip adding it, since it's nearly linearly
+        //dependent with the existing set of vectors.
+        let to_add_length = to_add.norm_l2();
+        if (to_add_length > min_length) {
+            to_add *= 1.0f32 / to_add_length;
+            //Presumably orthonormal now, throw it on
+            self.0.push(to_add);
+        }
+    }
+    pub fn to_orthonormal_matrix(self) -> Array2<f32> {
+        let views : Vec<ArrayView1<f32>> = self.0.iter()
+                          .map(|x| x.view())
+                          .collect();
+        stack(Axis(0), &views).unwrap()
+    }
+}
+
+impl AnnotatedGamePath {
+    pub fn derive_orthonormal_basis_change(&self) -> Array2<f32> {
+        let (u, sigma, vt) = self.target_matrix.svd(true, true).unwrap();
+        let u = u.unwrap();
+        let vt = vt.unwrap();
+        let ut = u.t();
+        //Now, with U^T and V^T, the rows are the left and right
+        //singular vectors, respectively. What we'll do is
+        //start from the pairs of singular vectors corresponding
+        //to the largest singular values, and add orthogonal vectors
+        //spanning the subspaces spanned by each left and right singular vector
+        let mut orthonormal_vector_set = OrthonormalVectorSet(Vec::new());
+        for i in 0..ut.shape()[0] {
+            let u_vec = ut.row(i);
+            let v_vec = vt.row(i);
+
+            let avg_vec = 0.5f32 * &u_vec + 0.5f32 * &v_vec;
+            //Directionality is from input toward output
+            let diff_vec = &u_vec - &v_vec;
+
+            let dot_product = u_vec.dot(&v_vec);
+
+            if (dot_product > 0.0) {
+                //Same directionality, so the average will capture
+                //the vectors better than the difference
+                orthonormal_vector_set.add_to_span(avg_vec);
+                orthonormal_vector_set.add_to_span(diff_vec);
+            } else {
+                //Opposite directionality, so the difference will
+                //capture the vectors better than their average
+                orthonormal_vector_set.add_to_span(diff_vec);
+                orthonormal_vector_set.add_to_span(avg_vec);
+            }
+        }
+        //Rows are in decreasing order of "importance", roughly.
+        let orthonormal_matrix = orthonormal_vector_set.to_orthonormal_matrix();
+
+        let (rows, cols) = (orthonormal_matrix.shape()[0], orthonormal_matrix.shape()[1]);
+        if (rows != cols) {
+            println!("Whoa there bucko {}, {}", rows, cols);
+        }
+
+        //Transpose the result, since we want to transform from
+        //the shifted coordinate space back to the original one
+        let orthonormal_matrix = orthonormal_matrix.t().clone();
+        orthonormal_matrix.to_owned()
+        
+    }
+    pub fn apply_orthonormal_basis_change(mut self, Q : ArrayView2<f32>) -> Self {
+        let matrix_set = self.matrix_set.apply_orthonormal_basis_change(Q);
+        let target_matrix = Q.t().dot(&self.target_matrix).dot(&Q);
+        let nodes = self.nodes.drain(..)
+                              .map(|x| x.apply_orthonormal_basis_change(Q))
+                              .collect();
+        AnnotatedGamePath {
+            matrix_set,
+            target_matrix,
+            nodes
+        }
+    }
 }
 
 impl GamePathNode {

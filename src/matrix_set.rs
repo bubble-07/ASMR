@@ -23,6 +23,13 @@ impl fmt::Display for MatrixSet {
     }
 }
 impl MatrixSet {
+    pub fn apply_orthonormal_basis_change(self, Q : ArrayView2<f32>) -> Self {
+        let MatrixSet(mut matrices) = self;
+        let result = matrices.drain(..)
+                             .map(|x| Q.t().dot(&x).dot(&Q))
+                             .collect();
+        MatrixSet(result)
+    }
     pub fn to_flattened_vec(self) -> Vec<f32> {
         let MatrixSet(mut matrices) = self;
         let mut result = Vec::new();
