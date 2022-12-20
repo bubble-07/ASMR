@@ -57,6 +57,9 @@ pub struct Params {
     pub batch_size : usize,
     ///Number of batches to hold out of the training set for validation
     pub held_out_validation_batches : usize,
+    ///Whether or not to freeze all layers other than the injector layers.
+    ///Useful when expanding the input size of a model
+    pub freeze_non_injector_layers : bool,
     ///GPU slot to use for training
     pub gpu_slot : usize
 }

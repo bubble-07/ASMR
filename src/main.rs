@@ -24,9 +24,10 @@ mod training_examples;
 mod network_rollout;
 mod batch_split;
 
-use tch::{kind, Tensor, nn::Adam, nn::OptimizerConfig, Cuda};
+use tch::{kind, Tensor, nn::Adam, nn::OptimizerConfig, Cuda, IndexOp};
 use std::fs;
 use std::sync::mpsc::*;
+use std::cmp::min;
 use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
@@ -37,6 +38,7 @@ use crate::game_tree::*;
 use crate::training_examples::*;
 use crate::synthetic_data::*;
 use crate::network_config::*;
+use crate::network::*;
 use crate::batch_split_training_examples::*;
 use std::str::from_utf8;
 use std::path::Path;
@@ -71,6 +73,12 @@ ASMR distill_game_data [game_config_path] [game_data_root] [training_data_output
     Using the given game configuration json, distills all game data files under the
     given game data root directory into bona fide training data, which is output
     into a file at the given specified output path
+ASMR recast_network [old_game_config_path] [new_game_config_path] 
+                    [network_config_input_path] [network_config_output_path]
+    Given an old and a new game configuration and an old network with pre-trained weights,
+    carries over as much from the previous network configuration as possible,
+    leaving any undetermined values randomized. This currently only works for changing
+    the size of the input matrices.
 ASMR train [game_config_path] [network_config_path] [training_data_path]
     Using the given game configuration json, trains the network
     with the initial configuration stored at the given network configuration path
@@ -166,6 +174,29 @@ fn main() {
                     let network_config_output_path = &args[3];
                     gen_network_config_command(params, network_config_output_path);
                 },
+                "recast_network" => {
+                    if (args.len() < 6) {
+                        eprintln!("error: not enough arguments");
+                        print_help();
+                        return;
+                    }
+                    let old_params = params;
+
+                    let new_network_params_path = &args[3];
+                    let maybe_new_config = load_game_config(new_network_params_path);
+
+                    match (maybe_new_config) {
+                        Result::Ok(new_params) => {
+                            let network_config_input_path = &args[4];                    
+                            let network_config_output_path = &args[5];
+                            recast_command(old_params, new_params,
+                                           network_config_input_path, network_config_output_path);
+                        },
+                        Result::Err(err) => {
+                            eprintln!("Failed to read new game config file: {}", err);
+                        },
+                    }
+                                    },
                 "train" => {
                     if (args.len() < 5) {
                         eprintln!("error: not enough arguments");
@@ -244,6 +275,78 @@ fn load_game_config(game_config_path : &str) -> Result<Params, String> {
         }
     }
 }
+
+fn recast_command(old_params : Params, new_params : Params,
+                  network_config_input_path : &str, 
+                  network_config_output_path : &str) {
+    let mut old_vs = tch::nn::VarStore::new(tch::Device::Cpu);
+    let old_network_config = NetworkConfig::new(&old_params, &old_vs.root());
+
+    let maybe_load_result = old_vs.load(&Path::new(network_config_input_path));
+    match (maybe_load_result) {
+        Result::Ok(_) => {
+            println!("Successfully loaded network config, recasting");
+        },
+        Result::Err(e) => {
+            eprintln!("Failed to read network config: {}", e);
+            panic!();
+        }
+    }
+    old_vs.freeze();
+
+    //Generate a new network using the new config
+    let mut new_vs = tch::nn::VarStore::new(tch::Device::Cpu);
+    let new_network_config = NetworkConfig::new(&new_params, &new_vs.root());
+
+    new_vs.freeze();
+
+    //Copy over all the old tensor values which are not part of the injector network
+    let mut old_variables = old_vs.variables();
+    let mut new_variables = new_vs.variables();
+    for (var_name, old_tensor) in old_variables.drain() {
+        let new_tensor = new_variables.get_mut(&var_name).unwrap();
+        if !var_name.contains("injector") {
+            new_tensor.copy_(&old_tensor);
+        } else if var_name.contains("weight") {
+            //Injector network's weights
+            let old_matrix_dim = old_params.matrix_dim as i64;
+            let new_matrix_dim = new_params.matrix_dim as i64;
+            let min_matrix_dim = min(old_matrix_dim, new_matrix_dim);
+
+            let old_matrix_size = old_matrix_dim * old_matrix_dim;
+            let new_matrix_size = new_matrix_dim * new_matrix_dim;
+
+            let reshaped_old_tensor = 
+                old_tensor.reshape(&[old_params.num_feat_maps as i64, old_matrix_dim, old_matrix_dim]);
+            let reshaped_new_tensor =
+                new_tensor.reshape(&[new_params.num_feat_maps as i64, new_matrix_dim, new_matrix_dim]);
+        
+            reshaped_new_tensor.i((.., ..min_matrix_dim, ..min_matrix_dim))
+                               .copy_(&reshaped_old_tensor);
+
+            let reshaped_new_tensor = reshaped_new_tensor.reshape(&[new_params.num_feat_maps as i64,
+                                                                    new_matrix_size]);
+            new_tensor.copy_(&reshaped_new_tensor);
+        } else if var_name.contains("bias") {
+            //Injector bias, copy this over, since it should have the same dims
+            new_tensor.copy_(&old_tensor);
+        }
+    }
+
+    new_vs.unfreeze();
+
+    //Output the updated network
+    let maybe_save_result = new_vs.save(&Path::new(network_config_output_path));
+    match (maybe_save_result) {
+        Result::Ok(_) => {
+            println!("Successfully wrote out a new network configuration");
+        },
+        Result::Err(e) => {
+            eprintln!("Failed to write out network configuration: {}", e);
+        }
+    }
+}
+
 fn gen_network_config_command(params : Params, network_config_output_path : &str) {
     let vs = tch::nn::VarStore::new(tch::Device::Cpu);
     let _network_config = NetworkConfig::new(&params, &vs.root());
@@ -504,6 +607,19 @@ fn train_command(params : Params, network_config_path : &str, training_data_path
         Result::Err(e) => {
             eprintln!("Failed to read initial network config: {}", e);
             return;
+        }
+    }
+
+    //Respect the freeze_non_injector_layers parameter
+    for (var_name, tensor) in vs.variables() {
+        if (params.freeze_non_injector_layers) {
+            if (var_name.contains("injector")) {
+                tensor.set_requires_grad(true);
+            } else {
+                tensor.set_requires_grad(false);
+            }
+        } else {
+            tensor.set_requires_grad(true);
         }
     }
 
