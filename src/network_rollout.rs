@@ -59,6 +59,35 @@ pub struct NetworkRolloutDiff {
     pub right_indices : Tensor,
 }
 
+impl NetworkRolloutDiff {
+    ///Assuming that this network rollout diff has a bunch of different
+    ///rollouts, splits it into single-rollout diffs
+    pub fn split_to_singles(self) -> Vec<NetworkRolloutDiff> {
+        let rollout_states_diffs = self.rollout_states_diff.split_to_singles();
+        let peel_track_states = self.peel_track_state.split_to_singles();
+        let added_output_activations = self.added_output_activations.split(1, 0);
+        let left_logits = self.left_logits.split(1, 0);
+        let right_logits = self.right_logits.split(1, 0);
+        let left_indices = self.left_indices.split(1, 0);
+        let right_indices = self.right_indices.split(1, 0);
+
+        zip(zip(zip(zip(zip(zip(rollout_states_diffs, peel_track_states), added_output_activations),
+            left_logits), right_logits), left_indices), right_indices)
+        .map(|((((((rollout_states_diff, peel_track_state), added_output_activations),
+              left_logits), right_logits), left_indices), right_indices)| {
+            NetworkRolloutDiff {
+                rollout_states_diff,
+                peel_track_state,
+                added_output_activations,
+                left_logits,
+                right_logits,
+                left_indices,
+                right_indices,
+            }
+        }).collect()
+    }
+}
+
 impl NetworkRolloutState {
     pub fn shallow_clone(&self) -> Self {
         Self {
@@ -69,20 +98,34 @@ impl NetworkRolloutState {
             child_visit_logits : self.child_visit_logits.shallow_clone(),
         }
     }
+    ///Assuming that we currently have only one rollout, expands to incorporate
+    ///num_matrices * num_matrices rollouts
+    pub fn expand_for_all_moves(self) -> Self {
+        let num_matrices = self.rollout_states.get_num_matrices();
+        let num_children = num_matrices * num_matrices;
+
+        self.expand(num_children as usize)
+    }
+    ///Assuming that this rollout state currently only contains one rollout,
+    ///computes all diffs to the current rollout state which cover all of the
+    ///subsequent next possible moves
+    pub fn diff_all_moves(&self, network_config : &NetworkConfig) -> NetworkRolloutDiff {
+        let device = self.rollout_states.matrices.device();
+        let num_matrices = self.rollout_states.get_num_matrices();
+
+        let (left_indices, right_indices) = generate_2d_index_tensor_span(num_matrices, device);
+
+        let expanded_clone = self.shallow_clone().expand_for_all_moves();
+        let result = expanded_clone.manual_step_diff(network_config, &left_indices, &right_indices);
+        result
+    }
     ///Assuming that this rollout state currently only contains one rollout,
     ///expands it to rollout states which cover all of the subsequent
     ///next possible moves
     pub fn perform_all_moves(self, network_config : &NetworkConfig) -> Self {
-        let device = self.rollout_states.matrices.device();
-        let num_matrices = self.rollout_states.get_num_matrices();
-        let num_children = num_matrices * num_matrices;
-
-        let (left_indices, right_indices) = generate_2d_index_tensor_span(num_matrices, device);
-
-        //Expand and perform moves
-        let result = self.expand(num_children as usize);
-        let result = result.manual_step(&network_config, &left_indices, &right_indices);
-        result
+        let diff = self.diff_all_moves(network_config);
+        let result = self.expand_for_all_moves();
+        result.apply_diff(&diff)
     }
 
     //Expands a single-rollout NetworkRolloutState to have R identical rollouts

@@ -45,6 +45,17 @@ pub struct RolloutStatesDiff {
 }
 
 impl RolloutStatesDiff {
+    pub fn split_to_singles(self) -> Vec<RolloutStatesDiff> {
+        let min_distances = self.min_distances.split(1, 0);
+        let matrices = self.matrices.split(1, 0);
+        zip(min_distances, matrices)
+        .map(|(min_distances, matrices)| {
+            RolloutStatesDiff {
+                min_distances,
+                matrices
+            }
+        }).collect()
+    }
     pub fn get_flattened_added_matrices(&self) -> Tensor {
         let r = self.matrices.size()[0];
         let m = self.matrices.size()[2];

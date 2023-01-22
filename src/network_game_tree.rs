@@ -141,7 +141,15 @@ impl GameTreeTraverserTrait for NetworkTreeTraverser {
         let network_rollout_states = self.get_network_rollout_states().shallow_clone();
         let current_set_size = network_rollout_states.rollout_states.get_num_matrices() as usize;
 
-        let child_rollout_states = network_rollout_states.perform_all_moves(network_config);
+        let child_rollout_diffs = network_rollout_states.diff_all_moves(network_config);
+
+        let child_rollout_states = network_rollout_states.expand_for_all_moves();
+        let child_rollout_states = child_rollout_states.apply_diff(&child_rollout_diffs);
+
+        let mut child_rollout_diffs : Vec<Option<NetworkRolloutDiff>> = 
+            child_rollout_diffs.split_to_singles().drain(..)
+                                      .map(|x| Some(x)).collect();
+
         //Determine how many turns are left, and also the current set-size
         let child_num_turns = child_rollout_states.rollout_states.remaining_turns;
         let current_distances : Vec<f64> = child_rollout_states.rollout_states.min_distances.shallow_clone().into();
@@ -157,13 +165,17 @@ impl GameTreeTraverserTrait for NetworkTreeTraverser {
         for left_index in 0..current_set_size {
             for right_index in 0..current_set_size {
                 let combined_index = left_index + current_set_size * right_index;
+
+                let child_rollout_diff = std::mem::replace(&mut child_rollout_diffs[combined_index],
+                                                           None);
+
                 let edge_data = NetworkTreeEdge {
                     ordinary_data : OrdinaryEdgeData {
                         left_index,
                         right_index,
                         visit_count : 1,
                     },
-                    precomputed_data : None, //TODO: Store precomputed data in these nodes
+                    precomputed_data : child_rollout_diff,
                 };
                 let current_distance = current_distances[combined_index];
                 let ending_distance = ending_distances[combined_index];

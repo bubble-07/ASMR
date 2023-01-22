@@ -1,5 +1,6 @@
 use tch::{nn, kind::Kind, nn::Init, nn::Module, Tensor, 
     nn::Path, nn::Sequential, nn::LinearConfig, IndexOp};
+use std::iter::zip;
 
 ///The peeling state of one layer
 #[derive(Debug)]
@@ -50,6 +51,17 @@ pub struct PeelTrackStates {
 }
 
 impl PeelTrackStates {
+    pub fn split_to_singles(self) -> Vec<PeelTrackStates> {
+        let values = self.values.split(1, 1);
+        let interactions = self.interactions.split(1, 1);
+        zip(values, interactions)
+        .map(|(values, interactions)| {
+            PeelTrackStates {
+                values,
+                interactions,
+            }
+        }).collect()
+    }
     pub fn new(peel_track_states : Vec<PeelTrackState>) -> PeelTrackStates {
         let values : Vec<Tensor> = peel_track_states.iter().map(|x| x.value.shallow_clone()).collect();
         let interactions : Vec<Tensor> = peel_track_states.iter().map(|x| x.interaction.shallow_clone()).collect();

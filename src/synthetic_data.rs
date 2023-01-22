@@ -13,7 +13,8 @@ use ndarray_linalg::Norm;
 pub struct GamePathNode {
     pub left_index : usize,
     pub right_index : usize,
-    pub indegree : usize
+    pub indegree : usize,
+    pub cumulative_turns : usize, //Sums children for every parent node
 }
 
 pub struct AnnotatedGamePathNode {
@@ -332,13 +333,31 @@ impl GamePath {
             }
 
             let mut updated_nodes = Vec::new();
-            for node in self.nodes.drain(..) {
-                let updated_node = GamePathNode {
-                    left_index : *index_renumberings.get(&node.left_index).unwrap(),
-                    right_index : *index_renumberings.get(&node.right_index).unwrap(),
-                    indegree : node.indegree
-                };
-                updated_nodes.push(updated_node);
+            for (i, node) in self.nodes.drain(..).enumerate() {
+                let orig_index = init_set_size + i;
+                if !removed_indices.contains(&orig_index) {
+
+                    let left_index = if node.left_index >= init_set_size {
+                        *index_renumberings.get(&node.left_index).unwrap()
+                    } else {
+                        node.left_index
+                    };
+
+                    let right_index = if node.right_index >= init_set_size {
+                        *index_renumberings.get(&node.right_index).unwrap()
+                    } else {
+                        node.right_index
+                    };
+
+
+                    let updated_node = GamePathNode {
+                        left_index,
+                        right_index,
+                        indegree : node.indegree,
+                        cumulative_turns : node.cumulative_turns, //Cumulative turns not modified by gc
+                    };
+                    updated_nodes.push(updated_node);
+                }
             }
             self.nodes = updated_nodes;
         }
@@ -379,29 +398,39 @@ impl GamePath {
         index - self.get_initial_set_size()
     }
 
-    pub fn add_node(&mut self, left_index : usize, right_index : usize) {
+    ///Adds a node with the given left, right indices.
+    ///Returns the number of cumulative turns under the added node
+    pub fn add_node(&mut self, left_index : usize, right_index : usize) -> usize {
         let indegree = 0;
-        
-        let game_path_node = GamePathNode {
-            left_index,
-            right_index,
-            indegree
-        };
-
+        let mut cumulative_turns = 1;
+       
         if (self.is_node_index(left_index)) {
             let left_node_index = self.to_node_index(left_index);
-            self.nodes[left_node_index].indegree += 1;
+            let left_node = &mut self.nodes[left_node_index];
+            left_node.indegree += 1;
+            cumulative_turns += left_node.cumulative_turns;
         }
         if (self.is_node_index(right_index)) {
             let right_node_index = self.to_node_index(right_index);
-            self.nodes[right_node_index].indegree += 1;
+            let right_node = &mut self.nodes[right_node_index];
+            right_node.indegree += 1;
+            cumulative_turns += right_node.cumulative_turns;
         }
+ 
+        let game_path_node = GamePathNode {
+            left_index,
+            right_index,
+            indegree,
+            cumulative_turns,
+        };
 
         self.nodes.push(game_path_node);
+        cumulative_turns
     }
     
+    ///Returns the number of cumulative turns under the added node
     fn add_random_node<R : Rng + ?Sized>(&mut self, already_added_pairs : &mut HashSet<(usize, usize)>,
-                                             rng : &mut R) {
+                                             rng : &mut R) -> usize {
         let size = self.get_size();
         let mut left_index = rng.gen_range(0..size);
         let mut right_index = rng.gen_range(0..size);
@@ -412,7 +441,7 @@ impl GamePath {
             pair = (left_index, right_index);
         }
         already_added_pairs.insert(pair);
-        self.add_node(left_index, right_index);
+        self.add_node(left_index, right_index)
     }
     
     pub fn generate_game_path<R : Rng + ?Sized>(matrix_set : MatrixSet, 
@@ -421,9 +450,16 @@ impl GamePath {
         let mut already_added_pairs = HashSet::new();
 
         let mut result = GamePath::new(matrix_set);
-        for _ in 0..ground_truth_num_moves {
-            result.add_random_node(&mut already_added_pairs, rng);
+        //Generate a bunch of potential moves until one's cumulative number
+        //of turns under it matches what we wanted to generate.
+        loop {
+            let cumulative_turns = result.add_random_node(&mut already_added_pairs, rng);
+            if (cumulative_turns == ground_truth_num_moves) {
+                break;
+            }
         }
+        //GC unnecessary nodes in the generated game-path
+        result.garbage_collect();
         result
     }
 }

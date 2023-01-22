@@ -419,7 +419,7 @@ fn time_games_command(params : Params,
                 observations.push(observation);
                 println!("{}, {}, {}", iter_number + 1, value_elapsed, distance);
 
-                if (distance == 0.0f32) {
+                if (distance < 0.0001f32) {
                     reached_goal = true;
                     //If we reach the goal, we're done with this game, move on to the next.
                     break;
