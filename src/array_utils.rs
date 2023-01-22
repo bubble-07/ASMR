@@ -8,7 +8,19 @@ use rand::seq::SliceRandom;
 use rand::distributions::{Uniform, Distribution, WeightedIndex};
 use std::convert::{TryFrom, TryInto};
 
-use tch::{kind, Tensor};
+use tch::{kind::Kind, Tensor, Device};
+
+pub fn generate_2d_index_tensor_span(num_matrices : i64, device : Device) -> (Tensor, Tensor) {
+    let num_children = num_matrices * num_matrices;
+
+    let left_indices = Tensor::arange(num_matrices, (Kind::Int64, device));
+    let left_indices = left_indices.repeat(&[num_matrices]);
+
+    let right_indices = Tensor::arange(num_matrices, (Kind::Int64, device));
+    let right_indices = right_indices.repeat_interleave_self_int(num_matrices, Option::None,
+                                                                 Option::Some(num_children));
+    (left_indices, right_indices)
+}
 
 pub fn tensor_to_vector(tensor : &Tensor) -> Array1<f32> {
     ArrayBase::from_vec(tensor.into())

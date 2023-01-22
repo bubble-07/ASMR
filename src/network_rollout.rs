@@ -42,7 +42,33 @@ pub struct NetworkRolloutState {
     pub child_visit_logits : VisitLogitMatrices,
 }
 
+///Diff to a rollout state with R rollouts 
+pub struct NetworkRolloutDiff {
+    ///Diff to the rollout states
+    pub rollout_states_diff : RolloutStatesDiff,
+    ///States of the peel track added
+    pub peel_track_state : PeelTrackStates,
+    ///Dim RxF - output activation of chosen matrix
+    pub added_output_activations : Tensor,
+    ///Leftover logits for the child visit logit matrix
+    ///Dim Rx(k+t_init)
+    pub left_logits : Tensor,
+    ///Dim Rx(K+t_init + 1)
+    pub right_logits : Tensor,
+    pub left_indices : Tensor,
+    pub right_indices : Tensor,
+}
+
 impl NetworkRolloutState {
+    pub fn shallow_clone(&self) -> Self {
+        Self {
+            rollout_states : self.rollout_states.shallow_clone(),
+            peeling_states : self.peeling_states.shallow_clone(),
+            output_activations : self.output_activations.shallow_clone(),
+            global_output_activation : self.global_output_activation.shallow_clone(),
+            child_visit_logits : self.child_visit_logits.shallow_clone(),
+        }
+    }
     ///Assuming that this rollout state currently only contains one rollout,
     ///expands it to rollout states which cover all of the subsequent
     ///next possible moves
@@ -51,13 +77,7 @@ impl NetworkRolloutState {
         let num_matrices = self.rollout_states.get_num_matrices();
         let num_children = num_matrices * num_matrices;
 
-        //Construct the left/right indices tensors
-        let left_indices = Tensor::arange(num_matrices, (Kind::Int64, device));
-        let left_indices = left_indices.repeat(&[num_matrices]);
-
-        let right_indices = Tensor::arange(num_matrices, (Kind::Int64, device));
-        let right_indices = right_indices.repeat_interleave_self_int(num_matrices, Option::None,
-                                                                     Option::Some(num_children));
+        let (left_indices, right_indices) = generate_2d_index_tensor_span(num_matrices, device);
 
         //Expand and perform moves
         let result = self.expand(num_children as usize);
@@ -150,32 +170,35 @@ impl NetworkRolloutState {
         self.manual_step(network_config, &left_indices, &right_indices)
     }
 
-    pub fn manual_step(self, network_config : &NetworkConfig, 
-                       left_indices : &Tensor, right_indices : &Tensor) -> Self {
+    pub fn complete_network_rollouts(self, network_config : &NetworkConfig) -> Self {
+        let mut result = self;
+        while result.rollout_states.remaining_turns > 0 {
+            result = result.step(network_config);
+        }
+        result
+    }
+    
+    pub fn manual_step_diff(&self, network_config : &NetworkConfig,
+                       left_indices : &Tensor, right_indices : &Tensor) -> NetworkRolloutDiff {
         let init_k_plus_t = self.rollout_states.get_num_matrices() as usize;
 
-        //First, perform the move
-        let (rollout_states, flattened_added_matrices) = 
-            self.rollout_states.perform_moves(left_indices, right_indices);
+        //Compute diff in rollout states
+        let rollout_states_diff = self.rollout_states.perform_moves_diff(left_indices, right_indices);
 
+        //Compute diff in input embeddings
+        let flattened_added_matrices = rollout_states_diff.get_flattened_added_matrices();
         let flattened_transformed_added_matrices = flattened_added_matrices.asinh().detach();
-
-        //Now to keep the network state up-to-date
-        
-        //Ensure that we mark the chosen indices as visited in the logit matrix
-        let mut child_visit_logits = self.child_visit_logits;
-        child_visit_logits.mask_chosen(left_indices, right_indices);
-        
-        //Derive the pre-activation for a new peel track
 
         //R x F
         let added_single_embeddings = network_config.injector_net.forward(&flattened_transformed_added_matrices);
+
+        //Compute diff in network activations
         
         //Update to the new layer activation peeling states by
         //"peeling forward" through the peel network, also yielding the
         //final activation out of the peeling track
-        let (peeling_states, added_output_activations) = 
-            network_config.peel_net.peel_forward(self.peeling_states, &added_single_embeddings);
+        let (peel_track_state, added_output_activations) = 
+            network_config.peel_net.peel_forward_diff(&self.peeling_states, &added_single_embeddings);
 
         //Expand child visit logit matrices from the newly-added output activations
         let mut left_logits = Vec::new();
@@ -205,18 +228,44 @@ impl NetworkRolloutState {
         //Dimension Rx(k+t_init + 1)
         let right_logits = Tensor::concat(&right_logits, 1);
 
+        let left_indices = left_indices.shallow_clone();
+        let right_indices = right_indices.shallow_clone();
+
+        NetworkRolloutDiff {
+            rollout_states_diff,
+            peel_track_state,
+            added_output_activations,
+            left_logits,
+            right_logits,
+            left_indices,
+            right_indices,
+        }
+    }
+
+    pub fn apply_diff(self, network_rollout_diff : &NetworkRolloutDiff) -> Self {
+        //Update rollout states
+        let rollout_states = self.rollout_states.apply_diff(&network_rollout_diff.rollout_states_diff);
+        
+        //Update peeling tracks
+        let peeling_states = self.peeling_states.push_tracks(&network_rollout_diff.peel_track_state);
+
+        //Mask the chosen indices in the child visit logits
+        let mut child_visit_logits = self.child_visit_logits;
+        child_visit_logits.mask_chosen(&network_rollout_diff.left_indices,
+                                       &network_rollout_diff.right_indices);
+
         //Reshape so that we can properly append
         //Varies across first coordinate, so should be column vectors
-        let left_logits = left_logits.unsqueeze(2);
+        let left_logits = network_rollout_diff.left_logits.unsqueeze(2);
         //Varies across second coordinate, so should be row vectors
-        let right_logits = right_logits.unsqueeze(1);
+        let right_logits = network_rollout_diff.right_logits.unsqueeze(1);
 
         let child_visit_logits = Tensor::concat(&[child_visit_logits.0, left_logits], 2);
         let child_visit_logits = Tensor::concat(&[child_visit_logits, right_logits], 1);
         let child_visit_logits = VisitLogitMatrices(child_visit_logits);
         
         //Add output activations to our running list
-        let added_output_activations = added_output_activations.unsqueeze(0);
+        let added_output_activations = network_rollout_diff.added_output_activations.unsqueeze(0);
         let output_activations = Tensor::concat(&[self.output_activations, added_output_activations], 0);
 
         NetworkRolloutState {
@@ -226,6 +275,19 @@ impl NetworkRolloutState {
             global_output_activation : self.global_output_activation,
             child_visit_logits,
         }
+    }
+
+    //Performs a single move. Assumes that we only have a single rollout rn.
+    pub fn perform_move(self, network_config : &NetworkConfig, left_index : usize, right_index : usize) -> Self {
+        let left_indices = Tensor::try_from(&vec![left_index as i64]).unwrap();
+        let right_indices = Tensor::try_from(&vec![right_index as i64]).unwrap();
+        self.manual_step(network_config, &left_indices, &right_indices)
+    }
+
+    pub fn manual_step(self, network_config : &NetworkConfig, 
+                       left_indices : &Tensor, right_indices : &Tensor) -> Self {
+        let diff = self.manual_step_diff(network_config, left_indices, right_indices);
+        self.apply_diff(&diff)
     }
 
     //From an initial rolloutstates - must not have made any turns yet!

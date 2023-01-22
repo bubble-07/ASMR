@@ -1,5 +1,10 @@
+use std::rc::Rc;
 use crate::game_state::*;
 use crate::matrix_set::*;
+use crate::game_tree_trait::*;
+use crate::network_config::*;
+use crate::random_game_tree::*;
+use crate::network_game_tree::*;
 use rand::Rng;
 use rand_distr::{Uniform, Geometric, LogNormal, Distribution, StandardNormal};
 use ndarray::*;
@@ -9,7 +14,6 @@ use ndarray::{Array, ArrayBase};
 use std::convert::TryInto;
 use serde::{Serialize, Deserialize};
 use crate::synthetic_data::*;
-use crate::game_tree::*;
 
 #[derive(Serialize, Deserialize)]
 pub struct Params {
@@ -40,7 +44,7 @@ pub struct Params {
     ///Number of games for timing purposes
     pub num_timing_games : usize,
     ///The strategy to employ for performing rollouts during MCTS.
-    ///Can be "greedy", "random", or "network"
+    ///Can be "random", or "network"
     pub rollout_strategy : String,
     ///Number of batches before evaluating validation loss
     ///and potentially saving out the updated network configuration for training
@@ -64,10 +68,28 @@ pub struct Params {
     pub gpu_slot : usize
 }
 
+pub enum RolloutStrategy {
+    Random,
+    NetworkConfig,
+}
+
+impl RolloutStrategy {
+    pub fn build_game_tree(&self, network_config : Rc<NetworkConfig>, 
+        game_state : GameState) -> Box<dyn GameTreeTraverserTrait> {
+        match self {
+            RolloutStrategy::Random => {
+                Box::new(RandomTreeTraverser::build_from_game_state(game_state))
+            },
+            RolloutStrategy::NetworkConfig => {
+                Box::new(NetworkTreeTraverser::build_from_game_state(network_config, game_state))
+            },
+        }
+    }
+}
+
 impl Params {
     pub fn get_rollout_strategy(&self) -> RolloutStrategy {
         match (self.rollout_strategy.as_str()) {
-            "greedy" => RolloutStrategy::Greedy,
             "random" => RolloutStrategy::Random,
             "network" => RolloutStrategy::NetworkConfig,
             x => {
@@ -153,6 +175,10 @@ impl Params {
         let target = Self::generate_target_matrix(&matrix_set, ground_truth_num_moves, rng);
 
         GameState::new(matrix_set, target, remaining_turns)
+    }
+    pub fn generate_random_standard_game<R : Rng + ?Sized>(&self, rng : &mut R) -> GameState {
+        let game_state = self.generate_random_game(rng);
+        game_state.standardize()
     }
 }
 //Random notes: Rubik's cube group, for instance, can have representations with matrix dimension ~20,

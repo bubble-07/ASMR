@@ -83,53 +83,56 @@ impl OrthonormalVectorSet {
     }
 }
 
+pub fn derive_orthonormal_basis_change_from_target_matrix(target_matrix : ArrayView2<f32>) -> Array2<f32> {
+    let (u, sigma, vt) = target_matrix.svd(true, true).unwrap();
+    let u = u.unwrap();
+    let vt = vt.unwrap();
+    let ut = u.t();
+    //Now, with U^T and V^T, the rows are the left and right
+    //singular vectors, respectively. What we'll do is
+    //start from the pairs of singular vectors corresponding
+    //to the largest singular values, and add orthogonal vectors
+    //spanning the subspaces spanned by each left and right singular vector
+    let mut orthonormal_vector_set = OrthonormalVectorSet(Vec::new());
+    for i in 0..ut.shape()[0] {
+        let u_vec = ut.row(i);
+        let v_vec = vt.row(i);
+
+        let avg_vec = 0.5f32 * &u_vec + 0.5f32 * &v_vec;
+        //Directionality is from input toward output
+        let diff_vec = &u_vec - &v_vec;
+
+        let dot_product = u_vec.dot(&v_vec);
+
+        if (dot_product > 0.0) {
+            //Same directionality, so the average will capture
+            //the vectors better than the difference
+            orthonormal_vector_set.add_to_span(avg_vec);
+            orthonormal_vector_set.add_to_span(diff_vec);
+        } else {
+            //Opposite directionality, so the difference will
+            //capture the vectors better than their average
+            orthonormal_vector_set.add_to_span(diff_vec);
+            orthonormal_vector_set.add_to_span(avg_vec);
+        }
+    }
+    //Rows are in decreasing order of "importance", roughly.
+    let orthonormal_matrix = orthonormal_vector_set.to_orthonormal_matrix();
+
+    let (rows, cols) = (orthonormal_matrix.shape()[0], orthonormal_matrix.shape()[1]);
+    if (rows != cols) {
+        println!("Whoa there bucko {}, {}", rows, cols);
+    }
+
+    //Transpose the result, since we want to transform from
+    //the shifted coordinate space back to the original one
+    let orthonormal_matrix = orthonormal_matrix.t().clone();
+    orthonormal_matrix.to_owned()
+ }
+
 impl AnnotatedGamePath {
     pub fn derive_orthonormal_basis_change(&self) -> Array2<f32> {
-        let (u, sigma, vt) = self.target_matrix.svd(true, true).unwrap();
-        let u = u.unwrap();
-        let vt = vt.unwrap();
-        let ut = u.t();
-        //Now, with U^T and V^T, the rows are the left and right
-        //singular vectors, respectively. What we'll do is
-        //start from the pairs of singular vectors corresponding
-        //to the largest singular values, and add orthogonal vectors
-        //spanning the subspaces spanned by each left and right singular vector
-        let mut orthonormal_vector_set = OrthonormalVectorSet(Vec::new());
-        for i in 0..ut.shape()[0] {
-            let u_vec = ut.row(i);
-            let v_vec = vt.row(i);
-
-            let avg_vec = 0.5f32 * &u_vec + 0.5f32 * &v_vec;
-            //Directionality is from input toward output
-            let diff_vec = &u_vec - &v_vec;
-
-            let dot_product = u_vec.dot(&v_vec);
-
-            if (dot_product > 0.0) {
-                //Same directionality, so the average will capture
-                //the vectors better than the difference
-                orthonormal_vector_set.add_to_span(avg_vec);
-                orthonormal_vector_set.add_to_span(diff_vec);
-            } else {
-                //Opposite directionality, so the difference will
-                //capture the vectors better than their average
-                orthonormal_vector_set.add_to_span(diff_vec);
-                orthonormal_vector_set.add_to_span(avg_vec);
-            }
-        }
-        //Rows are in decreasing order of "importance", roughly.
-        let orthonormal_matrix = orthonormal_vector_set.to_orthonormal_matrix();
-
-        let (rows, cols) = (orthonormal_matrix.shape()[0], orthonormal_matrix.shape()[1]);
-        if (rows != cols) {
-            println!("Whoa there bucko {}, {}", rows, cols);
-        }
-
-        //Transpose the result, since we want to transform from
-        //the shifted coordinate space back to the original one
-        let orthonormal_matrix = orthonormal_matrix.t().clone();
-        orthonormal_matrix.to_owned()
-        
+        derive_orthonormal_basis_change_from_target_matrix(self.target_matrix.view())
     }
     pub fn apply_orthonormal_basis_change(mut self, Q : ArrayView2<f32>) -> Self {
         let matrix_set = self.matrix_set.apply_orthonormal_basis_change(Q);

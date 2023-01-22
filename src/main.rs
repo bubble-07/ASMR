@@ -3,6 +3,10 @@
 #![allow(unused_imports)]
 #![allow(unused_parens)]
 
+mod network_game_tree;
+mod random_game_tree;
+mod game_tree_trait;
+mod tree;
 mod tweakable_tensor;
 mod peeling_states;
 mod bunched_rollout;
@@ -10,7 +14,6 @@ mod visit_logit_matrices;
 mod network_module;
 mod synthetic_data;
 mod rollout_states;
-mod game_tree;
 mod normal_inverse_chi_squared;
 mod array_utils;
 mod matrix_set;
@@ -26,15 +29,16 @@ mod batch_split;
 
 use tch::{kind, Tensor, nn::Adam, nn::OptimizerConfig, Cuda, IndexOp};
 use std::fs;
+use std::rc::Rc;
 use std::sync::mpsc::*;
 use std::cmp::min;
+use crate::game_tree_trait::DynRng;
 use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 use std::env;
 use crate::game_state::*;
 use crate::params::*;
-use crate::game_tree::*;
 use crate::training_examples::*;
 use crate::synthetic_data::*;
 use crate::network_config::*;
@@ -383,15 +387,17 @@ fn time_games_command(params : Params,
                       network_config_path : &str,
                       timing_csv_output_path : &str) {
     let mut rng = rand::thread_rng();
+    let mut rng = DynRng::from(&mut rng);
 
     let network_config = load_network_config_for_inference(&params, network_config_path);
+    let network_config = Rc::new(network_config);
     let rollout_strategy = params.get_rollout_strategy();
 
     for game_number in 0..params.num_timing_games {
-        let game_state = params.generate_random_game(&mut rng);
+        let game_state = params.generate_random_standard_game(&mut rng);
         let mut min_distance = game_state.get_distance();
 
-        let mut game_tree = GameTree::new(game_state);
+        let mut game_tree = rollout_strategy.build_game_tree(network_config.clone(), game_state);
 
         let mut observations = Vec::new();
         
@@ -401,22 +407,27 @@ fn time_games_command(params : Params,
         println!("{}, {}, {}", 0, 0, min_distance);
 
         let start_instant = Instant::now();
+        let mut reached_goal = false;
         
         for iter_number in 0..params.iters_per_game {
-            let distance = game_tree.update_iteration(rollout_strategy, &network_config, &mut rng);
+            let distance = game_tree.perform_update_iteration(&mut rng);
             if (distance < min_distance) {
                 min_distance = distance;
                 let duration_elapsed = start_instant.elapsed(); 
                 let value_elapsed = duration_elapsed.as_millis();
-                let observation = (iter_number + 1, value_elapsed, min_distance);
+                let observation = (iter_number + 1, value_elapsed, distance);
                 observations.push(observation);
-                println!("{}, {}, {}", iter_number + 1, value_elapsed, min_distance);
+                println!("{}, {}, {}", iter_number + 1, value_elapsed, distance);
 
                 if (distance == 0.0f32) {
+                    reached_goal = true;
                     //If we reach the goal, we're done with this game, move on to the next.
                     break;
                 }
             }
+        }
+        if (!reached_goal) {
+            println!("Hit iter cap of {}", params.iters_per_game);
         }
     }
 
@@ -428,15 +439,18 @@ fn run_game_command(params : Params,
                     game_data_output_path : &str,
                     maybe_dotfile_output_path : Option<String>) {
     let mut rng = rand::thread_rng();
-    let game_state = params.generate_random_game(&mut rng);
-    let mut game_tree = GameTree::new(game_state);
+    let mut rng = DynRng::from(&mut rng);
+    let game_state = params.generate_random_standard_game(&mut rng);
 
     let network_config = load_network_config_for_inference(&params, network_config_path);
+    let network_config = Rc::new(network_config);
     let rollout_strategy = params.get_rollout_strategy();
+
+    let mut game_tree = rollout_strategy.build_game_tree(network_config, game_state);
 
     for i in 0..params.iters_per_game {
         println!("Iteration: {}", i);
-        game_tree.update_iteration(rollout_strategy, &network_config, &mut rng);
+        game_tree.perform_update_iteration(&mut rng);
     }
     match (maybe_dotfile_output_path) {
         Option::Some(dotfile_output_path) => {
@@ -453,23 +467,24 @@ fn run_game_command(params : Params,
         },
         _ => {}
     }
-    let maybe_serialized_game_data = bincode::serialize(&game_tree);
-    match (maybe_serialized_game_data) {
-        Result::Ok(serialized_game_data) => {
-            let maybe_write_result = write_to_path(game_data_output_path, &serialized_game_data);
-            match (maybe_write_result) {
-                Result::Ok(_) => {
-                    println!("Successfully wrote out generated game data");
-                },
-                Result::Err(err) => {
-                    println!("Failed to write out game data: {}", err);
-                }
-            }
-        },
-        Result::Err(err) => {
-            println!("Game data serialization error: {}", err);
-        }
-    }
+    //TODO: reimplement game-tree serialization
+    //let maybe_serialized_game_data = bincode::serialize(&game_tree);
+    //match (maybe_serialized_game_data) {
+    //    Result::Ok(serialized_game_data) => {
+    //        let maybe_write_result = write_to_path(game_data_output_path, &serialized_game_data);
+    //        match (maybe_write_result) {
+    //            Result::Ok(_) => {
+    //                println!("Successfully wrote out generated game data");
+    //            },
+    //            Result::Err(err) => {
+    //                println!("Failed to write out game data: {}", err);
+    //            }
+    //        }
+    //    },
+    //    Result::Err(err) => {
+    //        println!("Game data serialization error: {}", err);
+    //    }
+    //}
 }
 
 fn add_training_data_command(_params : Params, training_data_to_add_path : &str, training_data_output_path : &str) {

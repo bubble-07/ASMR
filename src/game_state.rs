@@ -2,6 +2,7 @@ use crate::matrix_set::*;
 use crate::array_utils::*;
 use std::cmp::min;
 use rand::Rng;
+use crate::synthetic_data;
 use tch::{kind, Tensor};
 use serde::{Serialize, Deserialize};
 use std::fmt;
@@ -25,6 +26,19 @@ impl fmt::Display for GameState {
 }
 
 impl GameState {
+    pub fn standardize(self) -> Self {
+        let Q = synthetic_data::derive_orthonormal_basis_change_from_target_matrix(self.target.view());
+        self.apply_orthonormal_basis_change(Q.view())
+    }
+    pub fn apply_orthonormal_basis_change(self, Q : ArrayView2<f32>) -> Self {
+        let matrix_set = self.matrix_set.apply_orthonormal_basis_change(Q);
+        let target = Q.t().dot(&self.target).dot(&Q);
+        Self {
+            matrix_set,
+            target,
+            ..self
+        }
+    }
     pub fn new(matrix_set : MatrixSet, target : Array2<f32>, remaining_turns : usize) -> Self {
         let mut distance = f32::MAX;
         let MatrixSet(matrices) = &matrix_set;

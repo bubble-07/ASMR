@@ -24,10 +24,9 @@ impl PeelStack {
         }
         PeelLayerStates::new(result)
     }
-    //Given current per-layer peel layer states, and the pre-activation for a new
-    //"peel" track, yields the updated peel layer states incorporating the new track
-    //and the final activation map out of the peel
-    pub fn peel_forward(&self, peel_layer_states : PeelLayerStates, x : &Tensor) -> (PeelLayerStates, Tensor) {
+    //Yields peeling tracks and the new output activation
+    pub fn peel_forward_diff(&self, peel_layer_states : &PeelLayerStates, x : &Tensor) ->
+        (PeelTrackStates, Tensor) {
         let mut activation = x.shallow_clone();
         let mut peeling_tracks = Vec::new();
         for i in 0..self.layers.len() {
@@ -39,7 +38,15 @@ impl PeelStack {
             peeling_tracks.push(peeling_track);
         }
         let peeling_tracks = PeelTrackStates::new(peeling_tracks);
-        let updated_peeling_states = peel_layer_states.push_tracks(peeling_tracks);
+        (peeling_tracks, activation)
+    }
+    //Given current per-layer peel layer states, and the pre-activation for a new
+    //"peel" track, yields the updated peel layer states incorporating the new track
+    //and the final activation map out of the peel
+    pub fn peel_forward(&self, peel_layer_states : PeelLayerStates, x : &Tensor) -> (PeelLayerStates, Tensor) {
+        let (peeling_tracks, activation) = self.peel_forward_diff(&peel_layer_states, x);
+
+        let updated_peeling_states = peel_layer_states.push_tracks(&peeling_tracks);
         (updated_peeling_states, activation)
     }
 }

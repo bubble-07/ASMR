@@ -31,6 +31,16 @@ pub struct PeelLayerStates {
     pub scaled_interaction_matrices : Tensor,
 }
 
+impl PeelLayerStates {
+    pub fn shallow_clone(&self) -> Self {
+        Self {
+            values : self.values.shallow_clone(),
+            interactions : self.interactions.shallow_clone(),
+            scaled_interaction_matrices : self.scaled_interaction_matrices.shallow_clone(),
+        }
+    }
+}
+
 ///The peeling states of a single track for all layers
 pub struct PeelTrackStates {
     ///L x N x F
@@ -127,7 +137,7 @@ impl PeelLayerStates {
         }
     }
     ///Pushes track along every layer to derive a new peeling state for every layer.
-    pub fn push_tracks(self, peel_track_states : PeelTrackStates) -> PeelLayerStates {
+    pub fn push_tracks(self, peel_track_states : &PeelTrackStates) -> PeelLayerStates {
         let track_values = peel_track_states.values.unsqueeze(2);
         let track_interactions = peel_track_states.interactions.unsqueeze(3);
 

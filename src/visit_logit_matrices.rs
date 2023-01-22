@@ -18,6 +18,9 @@ use std::fmt;
 pub struct VisitLogitMatrices(pub Tensor);
 
 impl VisitLogitMatrices {
+    pub fn shallow_clone(&self) -> Self {
+        VisitLogitMatrices(self.0.shallow_clone())
+    }
     pub fn expand(self, R : usize) -> Self {
         let R = R as i64;
         let matrices = self.0;
