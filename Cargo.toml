@@ -8,6 +8,8 @@ edition = "2018"
 
 [dependencies]
 
+statistical="1.0.0"
+fixedbitset="0.4.2"
 rayon="1.6.0"
 ndarray={version = "0.15.4", features = ["blas", "serde"] }
 ndarray-linalg={version = "0.14.1", features = ["openblas-static"]}

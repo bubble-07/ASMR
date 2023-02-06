@@ -243,6 +243,7 @@ impl NetworkRolloutState {
         let (peel_track_state, added_output_activations) = 
             network_config.peel_net.peel_forward_diff(&self.peeling_states, &added_single_embeddings);
 
+
         //Expand child visit logit matrices from the newly-added output activations
         let mut left_logits = Vec::new();
         let mut right_logits = Vec::new();
@@ -322,8 +323,9 @@ impl NetworkRolloutState {
 
     //Performs a single move. Assumes that we only have a single rollout rn.
     pub fn perform_move(self, network_config : &NetworkConfig, left_index : usize, right_index : usize) -> Self {
-        let left_indices = Tensor::try_from(&vec![left_index as i64]).unwrap();
-        let right_indices = Tensor::try_from(&vec![right_index as i64]).unwrap();
+        let device = self.output_activations.device();
+        let left_indices = Tensor::try_from(&vec![left_index as i64]).unwrap().to_device(device);
+        let right_indices = Tensor::try_from(&vec![right_index as i64]).unwrap().to_device(device);
         self.manual_step(network_config, &left_indices, &right_indices)
     }
 

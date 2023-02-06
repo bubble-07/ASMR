@@ -8,13 +8,14 @@ use rand::seq::SliceRandom;
 extern crate ndarray_linalg;
 use ndarray_linalg::svd::*;
 use ndarray_linalg::Norm;
+use fixedbitset::*;
 
 #[derive(Clone, Hash, PartialEq, Eq)]
 pub struct GamePathNode {
     pub left_index : usize,
     pub right_index : usize,
     pub indegree : usize,
-    pub cumulative_turns : usize, //Sums children for every parent node
+    pub cumulative_turns : FixedBitSet,
 }
 
 pub struct AnnotatedGamePathNode {
@@ -24,6 +25,7 @@ pub struct AnnotatedGamePathNode {
     pub added_matrix : Array2<f32>
 }
 
+#[derive(Clone)]
 pub struct GamePath {
     pub matrix_set : MatrixSet,
     pub nodes : Vec<GamePathNode>
@@ -177,7 +179,7 @@ impl GamePath {
 
         let mut child_visit_probabilities_by_added_node = self.get_child_visit_probabilities_by_added_node();
         let mut annotated_nodes = Vec::new();
-        
+
         for ((node, child_visit_probabilities), added_matrix) in self.nodes.drain(..)
                                                  .zip(child_visit_probabilities_by_added_node.drain(..))
                                                  .zip(added_matrices.drain(..)) {
@@ -354,7 +356,8 @@ impl GamePath {
                         left_index,
                         right_index,
                         indegree : node.indegree,
-                        cumulative_turns : node.cumulative_turns, //Cumulative turns not modified by gc
+                        cumulative_turns : node.cumulative_turns, //TODO: Doesn't actually update this,
+                        //despite the fact that indices have moved
                     };
                     updated_nodes.push(updated_node);
                 }
@@ -402,20 +405,26 @@ impl GamePath {
     ///Returns the number of cumulative turns under the added node
     pub fn add_node(&mut self, left_index : usize, right_index : usize) -> usize {
         let indegree = 0;
-        let mut cumulative_turns = 1;
+        
+        //Mark this turn's attendance
+        let mut cumulative_turns = FixedBitSet::with_capacity(self.nodes.len() + 1);
+        cumulative_turns.insert(self.nodes.len());
        
         if (self.is_node_index(left_index)) {
             let left_node_index = self.to_node_index(left_index);
             let left_node = &mut self.nodes[left_node_index];
             left_node.indegree += 1;
-            cumulative_turns += left_node.cumulative_turns;
+            //Union the cumulative turns
+            cumulative_turns.union_with(&left_node.cumulative_turns);
         }
         if (self.is_node_index(right_index)) {
             let right_node_index = self.to_node_index(right_index);
             let right_node = &mut self.nodes[right_node_index];
             right_node.indegree += 1;
-            cumulative_turns += right_node.cumulative_turns;
+            cumulative_turns.union_with(&right_node.cumulative_turns);
         }
+
+        let cumulative_num_turns = cumulative_turns.count_ones(..);
  
         let game_path_node = GamePathNode {
             left_index,
@@ -425,7 +434,7 @@ impl GamePath {
         };
 
         self.nodes.push(game_path_node);
-        cumulative_turns
+        cumulative_num_turns
     }
     
     ///Returns the number of cumulative turns under the added node
@@ -447,19 +456,25 @@ impl GamePath {
     pub fn generate_game_path<R : Rng + ?Sized>(matrix_set : MatrixSet, 
                                                 ground_truth_num_moves : usize,
                                                 rng : &mut R) -> GamePath {
-        let mut already_added_pairs = HashSet::new();
-
-        let mut result = GamePath::new(matrix_set);
-        //Generate a bunch of potential moves until one's cumulative number
-        //of turns under it matches what we wanted to generate.
+        //let iter_bound = ground_truth_num_moves;
+        //TODO: There's probably a sensible bound to create?
+        let iter_bound = matrix_set.len() + ground_truth_num_moves;
+        let iter_bound = iter_bound * iter_bound;
+        //Repeatedly try generating a game path
         loop {
-            let cumulative_turns = result.add_random_node(&mut already_added_pairs, rng);
-            if (cumulative_turns == ground_truth_num_moves) {
-                break;
+            let mut already_added_pairs = HashSet::new();
+            let mut result = GamePath::new(matrix_set.clone());
+            //Generate a bunch of potential moves until one's cumulative number
+            //of turns under it matches what we wanted to generate.
+            for _ in 0..iter_bound {
+                let cumulative_turns = result.add_random_node(&mut already_added_pairs, rng);
+                if (cumulative_turns == ground_truth_num_moves) {
+                    //GC unnecessary nodes in the generated game-path
+                    result.garbage_collect();
+                    return result;
+                }
             }
         }
-        //GC unnecessary nodes in the generated game-path
-        result.garbage_collect();
-        result
+        //return result;
     }
 }

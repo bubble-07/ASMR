@@ -75,13 +75,13 @@ pub enum RolloutStrategy {
 
 impl RolloutStrategy {
     pub fn build_game_tree(&self, network_config : Rc<NetworkConfig>, 
-        game_state : GameState) -> Box<dyn GameTreeTraverserTrait> {
+        game_state : GameState, device : tch::Device) -> Box<dyn GameTreeTraverserTrait> {
         match self {
             RolloutStrategy::Random => {
-                Box::new(RandomTreeTraverser::build_from_game_state(game_state))
+                Box::new(RandomTreeTraverser::build_from_game_state(game_state, device))
             },
             RolloutStrategy::NetworkConfig => {
-                Box::new(NetworkTreeTraverser::build_from_game_state(network_config, game_state))
+                Box::new(NetworkTreeTraverser::build_from_game_state(network_config, game_state, device))
             },
         }
     }

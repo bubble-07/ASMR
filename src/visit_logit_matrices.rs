@@ -103,17 +103,31 @@ impl VisitLogitMatrices {
 
         let all_logits = all_logits.put(&batch_indices, &logits_submatrix_sums, false);
         let all_policy = all_policy.put(&batch_indices, &policy_submatrix_sums, false);
-        
+
         //With that info, output a loss
         let unnormalized_loss = Self::softmax_cross_entropy_with_logits(&all_logits, &all_policy);
-        let normalization_factor = (((2 * k_plus_t - 1) as f64) / ((2 * k_plus_t) as f64));
-        let loss = normalization_factor * unnormalized_loss;
+        let scaling_factor = self.get_loss_scaling_factor() as f64;
+        let extra_scaling_factor = (((2 * k_plus_t - 1) as f64) / ((2 * k_plus_t) as f64));
+        let loss = (scaling_factor * extra_scaling_factor) * unnormalized_loss;
         loss
+    }
+
+    //fn get_loss_scaling_factor(&self) -> f32 {
+        //Motivated by the idea that bigger sets are not necessarily more important,
+        //and that the only valid reference comparison is against what random choice
+        //would be like, so we should normalize each trial against that.
+    //    let k_plus_t = self.get_matrix_dim();
+    //    1.0f32 / ((k_plus_t * k_plus_t) as f32)
+    //}
+    fn get_loss_scaling_factor(&self) -> f32 {
+        1.0f32
     }
 
     pub fn get_loss(&self, target_policy : &Tensor) -> Tensor {
         let VisitLogitMatrices(child_visit_logits) = &self;
-        Self::softmax_cross_entropy_with_logits(child_visit_logits, target_policy)
+        let unscaled_result = Self::softmax_cross_entropy_with_logits(child_visit_logits, target_policy);
+        let scaling_factor = self.get_loss_scaling_factor();
+        scaling_factor * unscaled_result 
     }
 
     //Assuming the first dimension is the batch dimension, compute cross-entropy with logits

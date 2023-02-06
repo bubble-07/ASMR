@@ -19,7 +19,10 @@ pub struct MatrixSet(pub Vec<Array2<f32>>);
 impl fmt::Display for MatrixSet {
     fn fmt(&self, f : &mut fmt::Formatter<'_>) -> fmt::Result {
         let MatrixSet(matrices) = &self;
-        write!(f, "{:?}", matrices)
+        for matrix in matrices {
+            write!(f, "{}, ", matrix)?;
+        }
+        Ok(())
     }
 }
 impl MatrixSet {

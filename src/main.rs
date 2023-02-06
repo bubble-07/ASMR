@@ -70,6 +70,9 @@ ASMR gen_synthetic_training_data_file [game_config_path] [training_data_output_p
 ASMR add_training_data [game_config_path] [training_data_to_add_path] [training_data_output_path]
     Using the given game configuration json, concatenates the training data
     at the given path to the training data at the output path, overwriting the destination
+ASMR display_training_data_stats [game_config_path] [training_data_input_path]
+    Using the given game configuration json, displays a bunch of statistics for the
+    training data loaded from the given input path.
 ASMR gen_network_config [game_config_path] [network_config_output_path]
     Using the given game configuration json, generates a randomly-initialized
     network configuration and outputs it to the given path
@@ -105,6 +108,15 @@ fn main() {
     match (maybe_game_config) {
         Result::Ok(params) => {
             match &command[..] {
+                "display_training_data_stats" => {
+                    if (args.len() < 4) {
+                        eprintln!("error: not enough arguments");
+                        print_help();
+                        return;
+                    }
+                    let training_data_input_path = &args[3];
+                    display_training_data_stats_command(params, training_data_input_path);
+                },
                 "add_training_data" => {
                     if (args.len() < 5) {
                         eprintln!("error: not enough arguments");
@@ -367,7 +379,8 @@ fn gen_network_config_command(params : Params, network_config_output_path : &str
 }
 
 fn load_network_config_for_inference(params : &Params, network_config_path : &str) -> NetworkConfig {
-    let mut vs = tch::nn::VarStore::new(tch::Device::Cpu);
+    let device = tch::Device::Cuda(params.gpu_slot);
+    let mut vs = tch::nn::VarStore::new(device);
     let network_config = NetworkConfig::new(params, &vs.root());
 
     let maybe_load_result = vs.load(&Path::new(network_config_path));
@@ -389,6 +402,8 @@ fn time_games_command(params : Params,
     let mut rng = rand::thread_rng();
     let mut rng = DynRng::from(&mut rng);
 
+    let device = tch::Device::Cuda(params.gpu_slot);
+
     let network_config = load_network_config_for_inference(&params, network_config_path);
     let network_config = Rc::new(network_config);
     let rollout_strategy = params.get_rollout_strategy();
@@ -397,7 +412,7 @@ fn time_games_command(params : Params,
         let game_state = params.generate_random_standard_game(&mut rng);
         let mut min_distance = game_state.get_distance();
 
-        let mut game_tree = rollout_strategy.build_game_tree(network_config.clone(), game_state);
+        let mut game_tree = rollout_strategy.build_game_tree(network_config.clone(), game_state, device);
 
         let mut observations = Vec::new();
         
@@ -441,12 +456,13 @@ fn run_game_command(params : Params,
     let mut rng = rand::thread_rng();
     let mut rng = DynRng::from(&mut rng);
     let game_state = params.generate_random_standard_game(&mut rng);
+    let device = tch::Device::Cuda(params.gpu_slot);
 
     let network_config = load_network_config_for_inference(&params, network_config_path);
     let network_config = Rc::new(network_config);
     let rollout_strategy = params.get_rollout_strategy();
 
-    let mut game_tree = rollout_strategy.build_game_tree(network_config, game_state);
+    let mut game_tree = rollout_strategy.build_game_tree(network_config, game_state, device);
 
     for i in 0..params.iters_per_game {
         println!("Iteration: {}", i);
@@ -485,6 +501,42 @@ fn run_game_command(params : Params,
     //        println!("Game data serialization error: {}", err);
     //    }
     //}
+}
+
+fn display_training_data_stats_command(_params : Params, training_data_input_path : &str) {
+    let input_path = Path::new(training_data_input_path);
+
+    let maybe_training_examples = TrainingExamples::load(&input_path, tch::Device::Cpu);
+
+    let training_examples = match (maybe_training_examples) {
+        Result::Ok(x) => x,
+        Result::Err(err) => {
+            eprintln!("Failed to load training examples: {}", err);
+            return;
+        }
+    };
+
+    println!("Stats for playout bundles:");
+    let mut number_and_strings = Vec::new();
+    for ((init_set_size, playout_length), playout_bundle) in training_examples.playout_bundles {
+        let num_examples = playout_bundle.get_num_playouts();
+        let mut string = format!("N: {}, Init Set Size: {}, Playout length: {}\n", 
+                                 num_examples, init_set_size, playout_length);
+        let matrix_target_elements : Vec<f32> = playout_bundle.flattened_matrix_targets.into();
+        let std_dev = statistical::standard_deviation(&matrix_target_elements, None);
+        string += format!("\tTarget matrix std_dev: {}\n", std_dev).as_str();
+        let final_set_size = init_set_size + playout_length;
+        let final_matrix_size = final_set_size * final_set_size;
+        let heaviness = ((num_examples * final_matrix_size) as f64) * (std_dev as f64) / 10000.0;
+        string += format!("\tHeaviness: {}", heaviness).as_str();
+        number_and_strings.push((num_examples, string));
+    }
+    number_and_strings.sort_by_key(|(n, k)| *n);
+    number_and_strings.reverse();
+    
+    for (_, string) in number_and_strings.drain(..) {
+        println!("{}", string);
+    }
 }
 
 fn add_training_data_command(_params : Params, training_data_to_add_path : &str, training_data_output_path : &str) {
@@ -558,7 +610,7 @@ fn gen_synthetic_training_data_file_command(params : &Params, training_data_outp
     (0..params.num_synthetic_training_games).into_par_iter()
     .map(|_| {
         let mut rng = rand::thread_rng();
-         let game_path = params.generate_random_game_path(&mut rng);
+        let game_path = params.generate_random_game_path(&mut rng);
         let annotated_game_path = game_path.annotate_path();
 
         //Change coordinates so the most important components come first

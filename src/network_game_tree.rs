@@ -55,8 +55,9 @@ impl NetworkTreeTraverser {
     fn get_network_rollout_states(&self) -> &NetworkRolloutState {
         &self.tree_traverser.get_traverser_state().network_rollout_state
     }
-    pub fn build_from_game_state(network_config : Rc<NetworkConfig>, game_state : GameState) -> Self {
-        let rollout_state = RolloutStates::from_single_game_state(&game_state); 
+    pub fn build_from_game_state(network_config : Rc<NetworkConfig>, game_state : GameState,
+                                 device : tch::Device) -> Self {
+        let rollout_state = RolloutStates::from_single_game_state(&game_state, device); 
         let network_rollout_state = NetworkRolloutState::from_rollout_states(&network_config, rollout_state);
 
         let network_tree_traverser_data = NetworkTreeTraverserData {
@@ -175,7 +176,7 @@ impl GameTreeTraverserTrait for NetworkTreeTraverser {
                         right_index,
                         visit_count : 1,
                     },
-                    precomputed_data : child_rollout_diff,
+                    precomputed_data : None,
                 };
                 let current_distance = current_distances[combined_index];
                 let ending_distance = ending_distances[combined_index];

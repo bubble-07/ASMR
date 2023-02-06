@@ -167,8 +167,9 @@ impl RolloutStates {
 
     //Performs a single move. Assumes that we only have a single rollout rn.
     pub fn perform_move(self, left_index : usize, right_index : usize) -> Self {
-        let left_indices = Tensor::try_from(&vec![left_index as i64]).unwrap();
-        let right_indices = Tensor::try_from(&vec![right_index as i64]).unwrap();
+        let device = self.matrices.device();
+        let left_indices = Tensor::try_from(&vec![left_index as i64]).unwrap().to_device(device);
+        let right_indices = Tensor::try_from(&vec![right_index as i64]).unwrap().to_device(device);
         self.manual_step(&left_indices, &right_indices)
     }
 
@@ -253,7 +254,7 @@ impl RolloutStates {
     }
 
     ///Constructs a single-rollout "RolloutStates" from a given game-state.
-    pub fn from_single_game_state(game_state : &GameState) -> RolloutStates {
+    pub fn from_single_game_state(game_state : &GameState, device : tch::Device) -> RolloutStates {
         let k = game_state.matrix_set.len();
         let current_distance = game_state.distance;
         let target = game_state.get_target();
@@ -267,12 +268,15 @@ impl RolloutStates {
         }
         //1xKxMxM
         let matrices = Tensor::stack(&matrices, 0).unsqueeze(0);
+        let matrices = matrices.to_device(device);
 
         //1 x (M * M)
         let flattened_targets = vector_to_tensor(flatten_matrix(target));
+        let flattened_targets = flattened_targets.to_device(device);
 
         //Only one rollout
         let min_distances = Tensor::of_slice(&[current_distance]);
+        let min_distances = min_distances.to_device(device);
 
         RolloutStates {
             min_distances,

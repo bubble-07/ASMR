@@ -46,8 +46,8 @@ impl HasTreeWithTraverser for RandomTreeTraverser {
 }
 
 impl RandomTreeTraverser {
-    pub fn build_from_game_state(game_state : GameState) -> Self {
-        let rollout_state = RolloutStates::from_single_game_state(&game_state); 
+    pub fn build_from_game_state(game_state : GameState, device : tch::Device) -> Self {
+        let rollout_state = RolloutStates::from_single_game_state(&game_state, device); 
 
         let random_tree_traverser_data = RandomTreeTraverserData {
             rollout_state : rollout_state.shallow_clone(),
