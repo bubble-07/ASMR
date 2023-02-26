@@ -44,7 +44,7 @@ pub fn policy_extraction_net<'a, T : Borrow<Path<'a>>>(params : &Params, vs : T)
     //especially as the main net and the peel net compete to get the
     //right assigned probabilities.
     let output_config = LinearConfig {
-        ws_init : Init::KaimingUniform,
+        ws_init : kaiming_uniform(),
         bs_init : Option::Some(Init::Const(0.0)),
         bias : true,
     };

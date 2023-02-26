@@ -2,7 +2,6 @@ use tch::{no_grad_guard, nn, nn::Init, nn::Module, Tensor, nn::Path, nn::Sequent
           nn::Optimizer, IndexOp, Device};
 use crate::network::*;
 use crate::neural_utils::*;
-use crate::game_state::*;
 use crate::array_utils::*;
 use crate::params::*;
 use crate::training_examples::*;

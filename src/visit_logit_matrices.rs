@@ -1,5 +1,4 @@
 extern crate ndarray;
-extern crate ndarray_linalg;
 extern crate rand;
 
 use rand::Rng;
@@ -10,7 +9,6 @@ use tch::{no_grad_guard, nn, nn::Init, nn::Module, Tensor, nn::Path, nn::Sequent
 
 use serde::{Serialize, Deserialize};
 use ndarray::*;
-use ndarray_linalg::*;
 use crate::array_utils::*;
 use std::fmt;
 

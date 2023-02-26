@@ -2,7 +2,8 @@ use tch::{no_grad_guard, nn, nn::Init, nn::Module, Tensor, nn::Path, nn::Sequent
           nn::Optimizer, IndexOp, Device, nn::VarStore};
 use crate::network::*;
 use crate::neural_utils::*;
-use crate::game_state::*;
+use crate::validation_set::*;
+use crate::playout_sketches::*;
 use crate::array_utils::*;
 use crate::params::*;
 use crate::batch_split_training_examples::*;
@@ -114,7 +115,8 @@ impl NetworkConfig {
     }
 
     pub fn run_training_epoch<R : Rng + ?Sized>(&self, params : &Params, 
-                              training_examples : &BatchSplitTrainingExamples, 
+                              training_examples : &BatchSplitTrainingExamples<PlayoutSketchBundle>,
+                              validation_set : &ValidationSet,
                               opt : &mut Optimizer,
                               device : Device,
                               rng : &mut R, vs : &tch::nn::VarStore
@@ -126,7 +128,10 @@ impl NetworkConfig {
         //First, train
         for _ in 0..num_iters {
             opt.zero_grad();
-            let batch = training_examples.iter_training_batches(rng, device).collect();
+            let batch = training_examples.iter_training_batches(rng, device)
+                                         .map(|(w, x)| (w, PlayoutBundle::from_sketch_bundle(params, x)))
+                                         .map(|(w, x)| (w, x.standardize()))
+                                         .collect();
             let iter_loss = get_loss_for_playout_bundles(&self, params, batch);
 
             let iter_loss_float = f64::from(&iter_loss);
@@ -140,7 +145,7 @@ impl NetworkConfig {
         //Then, obtain validation loss
         let _guard = no_grad_guard();
         let mut validation_loss = Tensor::scalar_tensor(0f64, (Kind::Float, device)).detach();
-        for validation_batch in training_examples.iter_validation_batches(device) {
+        for validation_batch in validation_set.iter_validation_batches(device) {
             validation_loss += get_loss_for_playout_bundles(&self, params, validation_batch);
         }
         (total_train_loss, f64::from(validation_loss))

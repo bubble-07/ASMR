@@ -3,14 +3,10 @@ use crate::game_tree_trait::*;
 use crate::tree::*;
 use crate::rollout_states::*;
 use crate::network_config::*;
-use crate::game_state::*;
 use crate::normal_inverse_chi_squared::*;
 
 pub struct RandomTreeBase {
     pub ordinary_root_data : OrdinaryRootData,
-    //Rollout states with exactly one rollout,
-    //and just starting from the base.
-    pub rollout_state : RolloutStates,
 }
 
 pub struct RandomTreeNode {
@@ -46,22 +42,19 @@ impl HasTreeWithTraverser for RandomTreeTraverser {
 }
 
 impl RandomTreeTraverser {
-    pub fn build_from_game_state(game_state : GameState, device : tch::Device) -> Self {
-        let rollout_state = RolloutStates::from_single_game_state(&game_state, device); 
-
+    pub fn build_from_game_state(rollout_state : RolloutStates) -> Self {
         let random_tree_traverser_data = RandomTreeTraverserData {
             rollout_state : rollout_state.shallow_clone(),
         };
 
-        let ordinary_root_node_data = OrdinaryNodeData::root_node_from_game_state(&game_state);
+        let ordinary_root_node_data = OrdinaryNodeData::root_node_from_game_state(&rollout_state);
         let root_node_data = RandomTreeNode {
             data : ordinary_root_node_data,
         };
 
-        let ordinary_root_data = OrdinaryRootData::from_single_game_state(game_state);
+        let ordinary_root_data = OrdinaryRootData::from_single_game_state(rollout_state);
         let root_data = RandomTreeBase {
             ordinary_root_data,
-            rollout_state
         };
 
         let tree_traverser = TreeWithTraverser::new(root_data, root_node_data,
@@ -74,7 +67,7 @@ impl RandomTreeTraverser {
 
 impl GameTreeTraverserTrait for RandomTreeTraverser {
     fn drain_indices_to_root(&mut self) -> Vec<NodeIndex> {
-        let rollout_state = self.tree_traverser.get_root_data().rollout_state.shallow_clone();
+        let rollout_state = self.tree_traverser.get_root_data().ordinary_root_data.game_state.shallow_clone();
         let traverser_state = RandomTreeTraverserData {
             rollout_state,
         };

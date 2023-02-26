@@ -1,7 +1,7 @@
 use tch::{nn, kind::Kind, nn::Init, nn::Module, Tensor, 
     nn::Path, nn::Sequential, nn::LinearConfig};
 use std::borrow::Borrow;
-use crate::network_module::{SimpleLinear, simple_linear, simple_linear_tweak};
+use crate::network_module::{SimpleLinear, simple_linear, simple_linear_tweak, kaiming_uniform};
 use crate::params::*;
 use crate::peeling_states::*;
 use crate::tweakable_tensor::*;
@@ -318,8 +318,8 @@ pub fn bilinear_self_attention<'a, T : Borrow<Path<'a>>>(network_path : T,
     let scaling_factor = 1.0f64 / (full_dimension as f64).sqrt();
     let dimensions = vec![full_dimension as i64, full_dimension as i64];
 
-    let interaction_matrix = network_path.var("interaction_matrix", &dimensions, Init::KaimingUniform);
-    let value_extractor = network_path.var("value_extractor", &dimensions, Init::KaimingUniform);
+    let interaction_matrix = network_path.var("interaction_matrix", &dimensions, kaiming_uniform());
+    let value_extractor = network_path.var("value_extractor", &dimensions, kaiming_uniform());
 
     let bias_dimensions = vec![full_dimension as i64];
 

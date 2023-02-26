@@ -6,28 +6,28 @@ use std::ops::Range;
 use crate::training_examples::*;
 use crate::batch_split::*;
 
-pub struct BatchSplitPlayoutBundle {
-    pub playout_bundle : PlayoutBundle,
+pub struct BatchSplitPlayoutBundle<BundleType : PlayoutBundleLike> {
+    pub playout_bundle : BundleType,
     pub weight : f64,
     pub batch_split : BatchSplit,
 }
-pub struct BatchSplitTrainingExamples {
-    pub training_examples : HashMap<(usize, usize), BatchSplitPlayoutBundle>,
+pub struct BatchSplitTrainingExamples<BundleType : PlayoutBundleLike> {
+    pub training_examples : HashMap<(usize, usize), BatchSplitPlayoutBundle<BundleType>>,
 }
 
-struct ValidationBatchIterator<'a> {
-    batch_split_training_examples : &'a BatchSplitTrainingExamples,
+struct ValidationBatchIterator<'a, BundleType : PlayoutBundleLike> {
+    batch_split_training_examples : &'a BatchSplitTrainingExamples<BundleType>,
     device : Device,
     plan : Vec<Vec<((usize, usize), f64, Range<i64>)>>,
 }
-impl<'a> Iterator for ValidationBatchIterator<'a> {
-    type Item = Vec<(f64, PlayoutBundle)>;
+impl <'a, BundleType : PlayoutBundleLike> Iterator for ValidationBatchIterator<'a, BundleType> {
+    type Item = Vec<(f64, BundleType)>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let mut step = self.plan.pop()?;
         let device = self.device;
         let training_examples = &self.batch_split_training_examples.training_examples;
-        let step_result : Vec<(f64, PlayoutBundle)> = 
+        let step_result : Vec<(f64, BundleType)> = 
             step.drain(..).map(|(key, weight, range)| {
                 let playout_bundle = training_examples.get(&key).unwrap().playout_bundle.grab_batch(range, device);
                 (weight, playout_bundle)
@@ -36,11 +36,11 @@ impl<'a> Iterator for ValidationBatchIterator<'a> {
     }
 }
 
-impl BatchSplitTrainingExamples {
+impl <BundleType : PlayoutBundleLike> BatchSplitTrainingExamples<BundleType> {
     ///Iterates over one round of training batches (one training batch per (set-size, game-length)
     ///pair). All of the weights in the sequence sum to 1.
     pub fn iter_training_batches<'a, R : Rng + ?Sized>(&'a self, rng : &'a mut R, device : Device) -> 
-                                impl Iterator<Item = (f64, PlayoutBundle)> + 'a {
+                                impl Iterator<Item = (f64, BundleType)> + 'a {
         self.training_examples.values()
             .filter_map(move |batch_split_bundle| {
                 let batch_index_range = batch_split_bundle.batch_split.grab_training_batch(rng)?;
@@ -51,7 +51,7 @@ impl BatchSplitTrainingExamples {
     }
     ///Iterates over all validation batches. All of the weights in the sequence sum to 1.
     pub fn iter_validation_batches<'a>(&'a self, device : Device) -> 
-                                impl Iterator<Item = Vec<(f64, PlayoutBundle)>> + 'a {
+                                impl Iterator<Item = Vec<(f64, BundleType)>> + 'a {
 
         //First, collect all of the validation batches for all of the training examples.
         let mut validation_batch_indices_and_weights : 
@@ -92,7 +92,7 @@ impl BatchSplitTrainingExamples {
         result
     }
 
-    pub fn from_training_examples(mut training_examples : TrainingExamples,
+    pub fn from_training_examples(mut training_examples : TrainingExamples<BundleType>,
                                   batch_size : usize,
                                   recommended_min_validation_batches : usize) -> Self {
         let mut total_num_examples : usize = 0;

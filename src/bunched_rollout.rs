@@ -3,6 +3,7 @@ use tch::{no_grad_guard, nn, nn::Init, nn::Module, Tensor, nn::Sequential, kind:
 use crate::training_examples::*;
 use crate::network_rollout::*;
 use crate::network_config::*;
+use crate::playout_sketches::*;
 use crate::rollout_states::*;
 use crate::params::*;
 use std::iter::zip;
@@ -29,7 +30,7 @@ impl PlayoutBundleTail {
     fn pop(&mut self) -> Option<PlayoutBundleTailNode> {
         self.tail_nodes.pop()
     }
-    fn new(playout_bundle : PlayoutBundle) -> PlayoutBundleTail {
+    fn new(playout_bundle : PlayoutSketchBundle) -> PlayoutBundleTail {
         //We're going to reverse each involved list, since they're in
         //chronological order, but we need them to _pop_ in chronological order
         let mut child_visit_probabilities = playout_bundle.child_visit_probabilities;
@@ -209,7 +210,7 @@ pub fn get_loss_for_playout_bundles(network_config : &NetworkConfig, params : &P
                     bundles_for_size.drain(..)), network_rollouts.drain(..)) {
             //Compute the base loss, and add it to our total
             let network_visit_logits = &network_rollout_state.child_visit_logits;
-            let actual_visit_probabilities = &bundle.child_visit_probabilities[0];
+            let actual_visit_probabilities = &bundle.sketch_bundle.child_visit_probabilities[0];
             let base_loss = network_visit_logits.get_loss(actual_visit_probabilities);
             total_loss += weight * base_loss;
 
@@ -218,7 +219,7 @@ pub fn get_loss_for_playout_bundles(network_config : &NetworkConfig, params : &P
             let final_set_size = bundle.get_final_set_size();
             //Note: Some of these bundles might have empty tails.
             //That's okay, we'll remove 'em prior to handling peels.
-            let bundle_tail = PlayoutBundleTail::new(bundle);
+            let bundle_tail = PlayoutBundleTail::new(bundle.sketch_bundle);
             let bundle_state = BundleState {
                 init_set_size,
                 final_set_size,

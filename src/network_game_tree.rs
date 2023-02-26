@@ -3,7 +3,6 @@ use rand::Rng;
 use crate::game_tree_trait::*;
 use crate::network_config::*;
 use crate::tree::*;
-use crate::game_state::*;
 use crate::rollout_states::*;
 use crate::network_rollout::*;
 use crate::normal_inverse_chi_squared::*;
@@ -55,21 +54,19 @@ impl NetworkTreeTraverser {
     fn get_network_rollout_states(&self) -> &NetworkRolloutState {
         &self.tree_traverser.get_traverser_state().network_rollout_state
     }
-    pub fn build_from_game_state(network_config : Rc<NetworkConfig>, game_state : GameState,
-                                 device : tch::Device) -> Self {
-        let rollout_state = RolloutStates::from_single_game_state(&game_state, device); 
-        let network_rollout_state = NetworkRolloutState::from_rollout_states(&network_config, rollout_state);
+    pub fn build_from_game_state(network_config : Rc<NetworkConfig>, rollout_state : RolloutStates) -> Self {
+        let network_rollout_state = NetworkRolloutState::from_rollout_states(&network_config, rollout_state.shallow_clone());
 
         let network_tree_traverser_data = NetworkTreeTraverserData {
             network_rollout_state : network_rollout_state.shallow_clone(),
         };
 
-        let ordinary_root_node_data = OrdinaryNodeData::root_node_from_game_state(&game_state);
+        let ordinary_root_node_data = OrdinaryNodeData::root_node_from_game_state(&rollout_state);
         let root_node_data = NetworkTreeNode {
             ordinary_data : ordinary_root_node_data,
         };
 
-        let ordinary_root_data = OrdinaryRootData::from_single_game_state(game_state);
+        let ordinary_root_data = OrdinaryRootData::from_single_game_state(rollout_state);
         let root_data = NetworkTreeBase {
             ordinary_root_data,
             network_config,

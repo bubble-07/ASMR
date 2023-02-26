@@ -1,5 +1,6 @@
 use tch::{nn, kind::Kind, nn::Init, nn::Module, Tensor, 
     nn::Path, nn::Sequential, nn::LinearConfig};
+use tch::nn::init;
 use std::borrow::Borrow;
 use crate::tweakable_tensor::*;
 
@@ -109,6 +110,14 @@ pub fn tri_concat_then_seq() -> TriConcatThenSequential {
     }
 }
 
+pub fn kaiming_uniform() -> init::Init {
+    init::Init::Kaiming {
+        dist : init::NormalOrUniform::Uniform,
+        fan : init::FanInOut::FanIn,
+        non_linearity : init::NonLinearity::ReLU, //Not quite correct, but close 'nuff
+    }
+}
+
 ///A layer which takes _matrices_ as input and yields
 ///a bilinear-feature-mapped output of the form
 ///A M A^T for a trainable matrix A. The input
@@ -136,7 +145,7 @@ pub fn bilinear_matrix_sketch<'a, T : Borrow<Path<'a>>>(vs : T,
 
     let sketching_matrix = vs.var("sketching_matrix",
                                   &[sqrt_out_dim, sqrt_in_dim],
-                                  Init::KaimingUniform);
+                                  kaiming_uniform());
 
     BilinearMatrixSketch {
         sketching_matrix,
@@ -301,7 +310,7 @@ pub fn linear_residual<'a, T : Borrow<Path<'a>>>(network_path : T,
     let bound = 1.0 / (dim as f64).sqrt();
 
     let first_bs = network_path.var("first_bias", &[dim as i64], Init::Uniform {lo : -bound, up : bound});
-    let first_ws = network_path.var("first_weights", &[dim as i64, dim as i64], Init::KaimingUniform);
+    let first_ws = network_path.var("first_weights", &[dim as i64, dim as i64], kaiming_uniform());
 
     //Inspired by ReZero [batchnorm-free resnets], we initialize these to zero
     let second_bs = network_path.var("second_bias", &[dim as i64], Init::Const(0.0));

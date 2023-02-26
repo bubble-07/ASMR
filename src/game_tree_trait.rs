@@ -1,15 +1,13 @@
 use rand::Rng;
 use rand::RngCore;
 use crate::tree::*;
-use crate::game_state::*;
 use crate::network_config::*;
 use crate::rollout_states::*;
 use crate::normal_inverse_chi_squared::*;
 use serde::{Serialize, Deserialize};
 
-#[derive(Serialize, Deserialize)]
 pub struct OrdinaryRootData {
-    pub game_state : GameState,
+    pub game_state : RolloutStates,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -20,7 +18,7 @@ pub struct OrdinaryEdgeData {
 }
 
 impl OrdinaryRootData {
-    pub fn from_single_game_state(game_state : GameState) -> Self {
+    pub fn from_single_game_state(game_state : RolloutStates) -> Self {
         OrdinaryRootData {
             game_state,
         }
@@ -34,8 +32,8 @@ pub struct OrdinaryNodeData {
 }
 
 impl OrdinaryNodeData {
-    pub fn root_node_from_game_state(game_state : &GameState) -> Self {
-        let current_distance = game_state.distance;
+    pub fn root_node_from_game_state(game_state : &RolloutStates) -> Self {
+        let current_distance = f32::from(&game_state.min_distances);
         let game_end_distance_distribution = NormalInverseChiSquared::Uninformative.update(current_distance as f64);
         OrdinaryNodeData {
             current_distance,
@@ -179,12 +177,12 @@ pub trait GameTreeTraverserTrait : TraverserLike {
     
     ///Needs to be invoked with the traverser at the root
     fn render_dotfile(&mut self) -> String {
-        let game_state = self.get_ordinary_root_data().game_state.clone();
+        let game_state = self.get_ordinary_root_data().game_state.shallow_clone();
         let content = self.render_dotfile_recursive(game_state);
         format!("digraph gametree {{\n {} \n }}", content)
     }
 
-    fn render_dotfile_recursive(&mut self, game_state : GameState) -> String {
+    fn render_dotfile_recursive(&mut self, game_state : RolloutStates) -> String {
         let current_node_index = self.get_current_node_index();
 
         let label_str = if (current_node_index == NodeIndex::from(0)) {
@@ -200,10 +198,11 @@ pub trait GameTreeTraverserTrait : TraverserLike {
             let child_node_index = child_edge_index.get_ending_node_index();
             let edge_data = self.get_ordinary_edge_data(child_edge_index);
 
-            let updated_game_state = game_state.clone().perform_move(edge_data.left_index, edge_data.right_index);
-            let added_matrix = updated_game_state.get_matrix_set().get_newest_matrix();
-
-            let label = format!("added: {}, visits: {}", added_matrix, edge_data.visit_count);
+            let updated_game_state = game_state.shallow_clone();
+            let updated_game_state_diff = game_state.perform_move_diff(edge_data.left_index, edge_data.right_index);
+            let updated_game_state = updated_game_state.apply_diff(&updated_game_state_diff);
+            
+            let label = format!("{}, visits: {}", &updated_game_state_diff, edge_data.visit_count);
             result += &format!("{} -> {} [label=\"{}\"];\n", current_node_index, child_node_index, label);
 
             //Recursively render

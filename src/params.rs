@@ -1,19 +1,20 @@
 use std::rc::Rc;
-use crate::game_state::*;
-use crate::matrix_set::*;
 use crate::game_tree_trait::*;
 use crate::network_config::*;
 use crate::random_game_tree::*;
 use crate::network_game_tree::*;
+use tch::{no_grad_guard, nn, nn::Init, nn::Module, Tensor, nn::Path, nn::Sequential, kind::Kind,
+          nn::Optimizer, IndexOp, Device};
 use rand::Rng;
 use rand_distr::{Uniform, Geometric, LogNormal, Distribution, StandardNormal};
 use ndarray::*;
-use ndarray_rand::RandomExt;
-use ndarray_linalg::*;
 use ndarray::{Array, ArrayBase};
 use std::convert::TryInto;
 use serde::{Serialize, Deserialize};
 use crate::synthetic_data::*;
+use crate::rollout_states::*;
+use crate::training_examples::*;
+use crate::playout_sketches::*;
 
 #[derive(Serialize, Deserialize)]
 pub struct Params {
@@ -75,19 +76,22 @@ pub enum RolloutStrategy {
 
 impl RolloutStrategy {
     pub fn build_game_tree(&self, network_config : Rc<NetworkConfig>, 
-        game_state : GameState, device : tch::Device) -> Box<dyn GameTreeTraverserTrait> {
+                           game_state : RolloutStates) -> Box<dyn GameTreeTraverserTrait> {
         match self {
             RolloutStrategy::Random => {
-                Box::new(RandomTreeTraverser::build_from_game_state(game_state, device))
+                Box::new(RandomTreeTraverser::build_from_game_state(game_state))
             },
             RolloutStrategy::NetworkConfig => {
-                Box::new(NetworkTreeTraverser::build_from_game_state(network_config, game_state, device))
+                Box::new(NetworkTreeTraverser::build_from_game_state(network_config, game_state))
             },
         }
     }
 }
 
 impl Params {
+    pub fn get_device(&self) -> Device {
+        Device::Cuda(self.gpu_slot)
+    }
     pub fn get_rollout_strategy(&self) -> RolloutStrategy {
         match (self.rollout_strategy.as_str()) {
             "random" => RolloutStrategy::Random,
@@ -102,49 +106,58 @@ impl Params {
         (self.matrix_dim * self.matrix_dim).try_into().unwrap()
     }
 
-    fn generate_random_orthogonal_matrix<R : Rng + ?Sized>(&self, rng : &mut R) -> Array2<f32> {
-        let standard_normal = StandardNormal;
+    ///Dims N X M X M
+    fn generate_random_orthogonal_matrices(&self, N : usize) -> Tensor {
+        let N = N as i64;
+        let M = self.matrix_dim as i64;
+        let normal_matrix = Tensor::randn(&[N, M, M], (Kind::Float, self.get_device()));
+        //Both N x M x M
+        let (Q, R) = Tensor::linalg_qr(&normal_matrix, "reduced");
+
+        //Correct non-uniqueness of decomposition by requiring R's diagonal
+        //elements to be positive
+        //N x M
+        let D = R.diagonal(0, -2, -1);
+        let signs = D.sign();
+        //N x M x M
+        let signs = signs.unsqueeze(1);
+        let signs = signs.expand(&[-1, M, -1], true);
+        let Q = Q * signs;
         
-        let normal_matrix = Array::random_using((self.matrix_dim, self.matrix_dim), standard_normal, rng);
-
-        let (maybe_u, _, _) = normal_matrix.svd(true, false).unwrap();
-        let u = maybe_u.unwrap();
-        u
+        Q
     }
 
-    fn generate_random_singular_value<R : Rng + ?Sized>(&self, rng : &mut R) -> f32 {
-        let log_normal = LogNormal::new(0.0, self.log_normal_std_dev).unwrap();
-        log_normal.sample(rng) as f32
+    ///Dims N x M
+    fn generate_random_singular_values(&self, N : usize) -> Tensor {
+        let N = N as i64;
+        let M = self.matrix_dim as i64;
+        let normal_values = Tensor::randn(&[N, M], (Kind::Float, self.get_device()));
+        let scaled_normal_values = self.log_normal_std_dev * normal_values;
+        scaled_normal_values.exp()
     }
 
-    fn generate_random_matrix<R : Rng + ?Sized>(&self, rng : &mut R) -> Array2<f32> {
-        let U = self.generate_random_orthogonal_matrix(rng);
-        let V = self.generate_random_orthogonal_matrix(rng);
-        let mut S = Array::zeros((self.matrix_dim, self.matrix_dim));
-        for i in 0..self.matrix_dim {
-            let singular_value = self.generate_random_singular_value(rng);
-            S[[i, i]] = singular_value;
-        }
-        let result = U.dot(&S).dot(&V);
-        result
+    ///Dims N x M x M
+    pub fn generate_random_matrices(&self, N : usize) -> Tensor {
+        let U = self.generate_random_orthogonal_matrices(N);
+        let V = self.generate_random_orthogonal_matrices(N);
+        let S = self.generate_random_singular_values(N);
+        //Dims N x M x M
+        let S = S.diag_embed(0, -2, -1);
+        U.matmul(&S).matmul(&V) 
     }
 
-    fn generate_matrix_set<R : Rng + ?Sized>(&self, set_size : usize, rng : &mut R) -> MatrixSet {
-        let mut matrices = Vec::new();
-
-        for _ in 0..set_size {
-            let matrix = self.generate_random_matrix(rng);
-            matrices.push(matrix);
-        }
-        MatrixSet(matrices)
+    pub fn generate_random_playout<R : Rng + ?Sized>(&self, rng : &mut R) -> PlayoutBundle {
+        let game_path = self.generate_random_game_path(rng);
+        let annotated_game_path = game_path.annotate_path();
+        let playout_sketch_bundle = PlayoutSketchBundle::from_single_annotated_game_path(annotated_game_path); 
+        let playout_bundle = PlayoutBundle::from_sketch_bundle(&self, playout_sketch_bundle);
+        playout_bundle
     }
 
-    fn generate_target_matrix<R : Rng + ?Sized>(matrix_set : &MatrixSet, 
-                                                ground_truth_num_moves : usize, 
-                                                rng : &mut R) -> Array2<f32> {
-        let matrix_set_clone = matrix_set.clone();
-        let game_path = GamePath::generate_game_path(matrix_set_clone, ground_truth_num_moves, rng);
-        game_path.get_target()
+    pub fn generate_random_standard_game<R : Rng + ?Sized>(&self, rng : &mut R) -> RolloutStates {
+        let random_playout = self.generate_random_playout(rng);
+        let standard_playout = random_playout.standardize();
+        RolloutStates::from_playout_bundle_initial_state(&standard_playout)
     }
 
     fn generate_initial_set_size<R : Rng + ?Sized>(&self, rng : &mut R) -> usize {
@@ -159,26 +172,9 @@ impl Params {
 
     pub fn generate_random_game_path<R : Rng + ?Sized>(&self, rng : &mut R) -> GamePath {
         let initial_set_size = self.generate_initial_set_size(rng);
-        let matrix_set = self.generate_matrix_set(initial_set_size, rng);
         let ground_truth_num_moves = self.generate_ground_truth_num_moves(rng);
         
-        GamePath::generate_game_path(matrix_set, ground_truth_num_moves, rng)
-    }
-
-    pub fn generate_random_game<R : Rng + ?Sized>(&self, rng : &mut R) -> GameState {
-        let initial_set_size = self.generate_initial_set_size(rng);
-        let ground_truth_num_moves = self.generate_ground_truth_num_moves(rng);
-
-        let remaining_turns = self.max_num_turns;
-        let matrix_set = self.generate_matrix_set(initial_set_size, rng);
-
-        let target = Self::generate_target_matrix(&matrix_set, ground_truth_num_moves, rng);
-
-        GameState::new(matrix_set, target, remaining_turns)
-    }
-    pub fn generate_random_standard_game<R : Rng + ?Sized>(&self, rng : &mut R) -> GameState {
-        let game_state = self.generate_random_game(rng);
-        game_state.standardize()
+        GamePath::generate_game_path(initial_set_size, ground_truth_num_moves, rng)
     }
 }
 //Random notes: Rubik's cube group, for instance, can have representations with matrix dimension ~20,

@@ -2,13 +2,13 @@ use tch::{no_grad_guard, nn, nn::Init, nn::Module, Tensor, nn::Path, nn::Sequent
           nn::Optimizer, IndexOp, Device};
 use crate::network::*;
 use crate::neural_utils::*;
-use crate::game_state::*;
 use crate::array_utils::*;
 use crate::params::*;
 use crate::training_examples::*;
 use crate::network_config::*;
 use ndarray::*;
 use std::convert::TryFrom;
+use std::fmt;
 
 use rand::Rng;
 use rand::seq::SliceRandom;
@@ -34,6 +34,15 @@ pub struct RolloutStates {
     pub remaining_turns : usize,
 }
 
+impl fmt::Display for RolloutStates {
+    fn fmt(&self, f : &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "set: {} \n target: {} \n turns: {}", 
+               self.matrices.to_string(80).unwrap(), 
+               self.flattened_targets.to_string(80).unwrap(), 
+               self.remaining_turns)
+    }
+}
+
 pub struct RolloutStatesDiff {
     ///1D tensor of size R, containing minimal distances along each rollout path
     ///at the most recent move in each rollout.
@@ -42,6 +51,12 @@ pub struct RolloutStatesDiff {
     ///The matrices which were added at this step
     ///R x 1 x M x M
     pub matrices : Tensor,
+}
+
+impl fmt::Display for RolloutStatesDiff {
+    fn fmt(&self, f : &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "added: {}", self.matrices.to_string(80).unwrap())
+    }
 }
 
 impl RolloutStatesDiff {
@@ -165,12 +180,22 @@ impl RolloutStates {
         self.matrices.size()[1]
     }
 
-    //Performs a single move. Assumes that we only have a single rollout rn.
-    pub fn perform_move(self, left_index : usize, right_index : usize) -> Self {
+    fn expand_single_indices(&self, left_index : usize, right_index : usize) -> (Tensor, Tensor) {
         let device = self.matrices.device();
         let left_indices = Tensor::try_from(&vec![left_index as i64]).unwrap().to_device(device);
         let right_indices = Tensor::try_from(&vec![right_index as i64]).unwrap().to_device(device);
+        (left_indices, right_indices)
+    }
+
+    //Performs a single move. Assumes that we only have a single rollout rn.
+    pub fn perform_move(self, left_index : usize, right_index : usize) -> Self {
+        let (left_indices, right_indices) = self.expand_single_indices(left_index, right_index);
         self.manual_step(&left_indices, &right_indices)
+    }
+
+    pub fn perform_move_diff(&self, left_index : usize, right_index : usize) -> RolloutStatesDiff {
+        let (left_indices, right_indices) = self.expand_single_indices(left_index, right_index);
+        self.perform_moves_diff(&left_indices, &right_indices)
     }
 
     pub fn manual_step(self, left_indices : &Tensor, right_indices : &Tensor) -> RolloutStates {
@@ -213,7 +238,7 @@ impl RolloutStates {
         //R x (M * M)
         let differences = &self.flattened_targets - &flattened_added_matrices;
         let squared_differences = differences.square();
-        let distances = squared_differences.sum_dim_intlist(&[1], false, Kind::Float);
+        let distances = squared_differences.sum_dim_intlist(Some(&[1 as i64] as &[i64]), false, Kind::Float);
 
         let min_distances = self.min_distances.fmin(&distances);
 
@@ -228,7 +253,7 @@ impl RolloutStates {
 
         let s = playout_bundle.flattened_initial_matrix_sets.size();
         let (n, k, m_squared) = (s[0], s[1], s[2]);
-        let remaining_turns = playout_bundle.left_matrix_indices.size()[1] as usize;
+        let remaining_turns = playout_bundle.sketch_bundle.left_matrix_indices.size()[1] as usize;
         let m = (m_squared as f64).sqrt() as i64;
 
         let matrices = playout_bundle.flattened_initial_matrix_sets.reshape(&[n, k, m, m]);
@@ -241,7 +266,7 @@ impl RolloutStates {
         let differences = &reshaped_targets - &playout_bundle.flattened_initial_matrix_sets;
         let squared_differences = differences.square();
         //N x K
-        let distances = squared_differences.sum_dim_intlist(&[1], false, Kind::Float);
+        let distances = squared_differences.sum_dim_intlist(Some(&[1 as i64] as &[i64]), false, Kind::Float);
         //N
         let (min_distances, _) = distances.min_dim(1, false);
 
@@ -253,38 +278,6 @@ impl RolloutStates {
         }
     }
 
-    ///Constructs a single-rollout "RolloutStates" from a given game-state.
-    pub fn from_single_game_state(game_state : &GameState, device : tch::Device) -> RolloutStates {
-        let k = game_state.matrix_set.len();
-        let current_distance = game_state.distance;
-        let target = game_state.get_target();
-        let remaining_turns = game_state.remaining_turns;
-
-        let mut matrices = Vec::new();
-        for i in 0..k {
-            let matrix = game_state.matrix_set.get(i);
-            let tensor = matrix_to_unbatched_tensor(matrix);
-            matrices.push(tensor);
-        }
-        //1xKxMxM
-        let matrices = Tensor::stack(&matrices, 0).unsqueeze(0);
-        let matrices = matrices.to_device(device);
-
-        //1 x (M * M)
-        let flattened_targets = vector_to_tensor(flatten_matrix(target));
-        let flattened_targets = flattened_targets.to_device(device);
-
-        //Only one rollout
-        let min_distances = Tensor::of_slice(&[current_distance]);
-        let min_distances = min_distances.to_device(device);
-
-        RolloutStates {
-            min_distances,
-            flattened_targets,
-            matrices,
-            remaining_turns
-        }
-    }
     //Expands a single-rollout "RolloutStates" to have R identical rollout states
     pub fn expand(self, R : usize) -> Self {
         let _guard = no_grad_guard();

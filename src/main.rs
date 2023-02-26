@@ -1,8 +1,10 @@
-#![allow(dead_code)]
+//#![allow(dead_code)]
 #![allow(non_snake_case)]
 #![allow(unused_imports)]
 #![allow(unused_parens)]
 
+mod validation_set;
+mod playout_sketches;
 mod network_game_tree;
 mod random_game_tree;
 mod game_tree_trait;
@@ -16,12 +18,10 @@ mod synthetic_data;
 mod rollout_states;
 mod normal_inverse_chi_squared;
 mod array_utils;
-mod matrix_set;
 mod params;
 mod neural_utils;
 mod network;
 mod network_config;
-mod game_state;
 mod batch_split_training_examples;
 mod training_examples;
 mod network_rollout;
@@ -37,9 +37,10 @@ use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 use std::env;
-use crate::game_state::*;
 use crate::params::*;
 use crate::training_examples::*;
+use crate::playout_sketches::*;
+use crate::validation_set::*;
 use crate::synthetic_data::*;
 use crate::network_config::*;
 use crate::network::*;
@@ -125,7 +126,7 @@ fn main() {
                     }
                     let training_data_to_add_path = &args[3];
                     let training_data_output_path = &args[4];
-                    add_training_data_command(params, training_data_to_add_path, training_data_output_path);
+                    add_training_data_command::<PlayoutBundle>(params, training_data_to_add_path, training_data_output_path);
                 },
                 "gen_synthetic_training_data_file" => {
                     if (args.len() < 4) {
@@ -410,9 +411,9 @@ fn time_games_command(params : Params,
 
     for game_number in 0..params.num_timing_games {
         let game_state = params.generate_random_standard_game(&mut rng);
-        let mut min_distance = game_state.get_distance();
+        let mut min_distance : f32 = f32::from(&game_state.min_distances);
 
-        let mut game_tree = rollout_strategy.build_game_tree(network_config.clone(), game_state, device);
+        let mut game_tree = rollout_strategy.build_game_tree(network_config.clone(), game_state);
 
         let mut observations = Vec::new();
         
@@ -462,7 +463,7 @@ fn run_game_command(params : Params,
     let network_config = Rc::new(network_config);
     let rollout_strategy = params.get_rollout_strategy();
 
-    let mut game_tree = rollout_strategy.build_game_tree(network_config, game_state, device);
+    let mut game_tree = rollout_strategy.build_game_tree(network_config, game_state);
 
     for i in 0..params.iters_per_game {
         println!("Iteration: {}", i);
@@ -508,7 +509,8 @@ fn display_training_data_stats_command(_params : Params, training_data_input_pat
 
     let maybe_training_examples = TrainingExamples::load(&input_path, tch::Device::Cpu);
 
-    let training_examples = match (maybe_training_examples) {
+    //TODO: May want to generalize the stats thing to the sketch playout bundles, too
+    let training_examples : TrainingExamples<PlayoutBundle> = match (maybe_training_examples) {
         Result::Ok(x) => x,
         Result::Err(err) => {
             eprintln!("Failed to load training examples: {}", err);
@@ -539,12 +541,13 @@ fn display_training_data_stats_command(_params : Params, training_data_input_pat
     }
 }
 
-fn add_training_data_command(_params : Params, training_data_to_add_path : &str, training_data_output_path : &str) {
+fn add_training_data_command<BundleType : PlayoutBundleLike>(_params : Params, 
+                                                             training_data_to_add_path : &str, training_data_output_path : &str) {
     let to_add_path = Path::new(training_data_to_add_path);
     let output_path = Path::new(training_data_output_path);
 
     let maybe_training_examples_to_add = TrainingExamples::load(&to_add_path, tch::Device::Cpu);
-    let training_examples_to_add = match (maybe_training_examples_to_add) {
+    let training_examples_to_add : TrainingExamples<BundleType> = match (maybe_training_examples_to_add) {
         Result::Ok(x) => x,
         Result::Err(err) => {
             eprintln!("Failed to load training examples to add: {}", err);
@@ -553,7 +556,7 @@ fn add_training_data_command(_params : Params, training_data_to_add_path : &str,
     };
 
     let maybe_training_examples_to_add_to = TrainingExamples::load(&output_path, tch::Device::Cpu);
-    let mut training_examples_to_add_to = match (maybe_training_examples_to_add_to) {
+    let mut training_examples_to_add_to : TrainingExamples<BundleType> = match (maybe_training_examples_to_add_to) {
         Result::Ok(x) => x,
         Result::Err(err) => {
             eprintln!("Failed to load training examples to add to: {}", err);
@@ -586,7 +589,7 @@ fn gen_synthetic_training_data_file_command(params : &Params, training_data_outp
     //collating responses into a training-examples builder.
     let (sender, receiver) = channel(); 
 
-    let builder = TrainingExamplesBuilder::new(params);
+    let builder = SketchExamplesBuilder::new();
     let builder_thread_handle = std::thread::spawn(move || {
         let mut builder = builder;
         loop {
@@ -612,10 +615,6 @@ fn gen_synthetic_training_data_file_command(params : &Params, training_data_outp
         let mut rng = rand::thread_rng();
         let game_path = params.generate_random_game_path(&mut rng);
         let annotated_game_path = game_path.annotate_path();
-
-        //Change coordinates so the most important components come first
-        let orthonormal_matrix = annotated_game_path.derive_orthonormal_basis_change();
-        let annotated_game_path = annotated_game_path.apply_orthonormal_basis_change(orthonormal_matrix.view());
 
         annotated_game_path
     })
@@ -702,6 +701,10 @@ fn train_command(params : Params, network_config_path : &str, training_data_path
                 params.held_out_validation_batches,
             );
 
+            println!("Elaborating validation set");
+            let validation_set = ValidationSet::from_batch_split_sketches(&params, &batch_split_training_examples);
+            println!("Validation set elaborated. Starting training.");
+
             let adam = Adam {
                 wd : params.weight_decay_factor,
                 ..Adam::default()
@@ -710,6 +713,7 @@ fn train_command(params : Params, network_config_path : &str, training_data_path
             let mut best_validation_loss = f64::INFINITY;
             loop {
                 let (train_loss, validation_loss) = network_config.run_training_epoch(&params, &batch_split_training_examples, 
+                                                                   &validation_set,
                                                                    &mut opt, device, &mut rng, &vs);
                 let current_time = SystemTime::now();
                 println!("train loss for the epoch: {} validation loss: {} current time: {:?}", 

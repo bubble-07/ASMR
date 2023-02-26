@@ -1,13 +1,11 @@
 use ndarray::*;
 use std::collections::HashSet;
 use std::collections::HashMap;
-use crate::matrix_set::*;
 use crate::array_utils::*;
 use rand::Rng;
 use rand::seq::SliceRandom;
-extern crate ndarray_linalg;
-use ndarray_linalg::svd::*;
-use ndarray_linalg::Norm;
+use tch::{no_grad_guard, nn, nn::Init, nn::Module, Tensor, nn::Path, nn::Sequential, kind::Kind,
+          nn::Optimizer, IndexOp, Device};
 use fixedbitset::*;
 
 #[derive(Clone, Hash, PartialEq, Eq)]
@@ -22,175 +20,120 @@ pub struct AnnotatedGamePathNode {
     pub left_index : usize,
     pub right_index : usize,
     pub child_visit_probabilities : Array2<f32>,
-    pub added_matrix : Array2<f32>
 }
 
+/// A semantic path that a game can take, but not involving
+/// anything relating to starting matrices, targets, visit
+/// probabilities, etc.
 #[derive(Clone)]
 pub struct GamePath {
-    pub matrix_set : MatrixSet,
+    pub initial_set_size : usize,
     pub nodes : Vec<GamePathNode>
 }
 
 pub struct AnnotatedGamePath {
-    pub matrix_set : MatrixSet,
-    pub target_matrix : Array2<f32>,
+    pub initial_set_size : usize,
     pub nodes : Vec<AnnotatedGamePathNode>
 }
 
-impl AnnotatedGamePathNode {
-    pub fn apply_orthonormal_basis_change(self, Q : ArrayView2<f32>) -> Self {
-        let added_matrix = Q.t().dot(&self.added_matrix).dot(&Q);
-        Self {
-            added_matrix,
-            ..self
-        }
-    }
-}
-
-struct OrthonormalVectorSet(pub Vec<Array1<f32>>);
-
-impl OrthonormalVectorSet {
-    pub fn add_to_span(&mut self, mut to_add : Array1<f32>) {
-        let min_length = 1e-2;
-
-        let init_norm = to_add.norm_l2();
-        if (init_norm < min_length) {
-            //Not going to be a useful vector
-            return;
-        }
-        //Normalize to_add
-        to_add *= 1.0f32 / init_norm;
-
-        //Orthogonalize
-        for existing_vector in &self.0 {
-            //Subtract off projection of to_add onto the existing
-            let dot_product = to_add.dot(existing_vector);
-            let projection = dot_product * existing_vector;
-            to_add -= &projection;
-        }
-        //Make sure that the vector we're adding has a nonzero norm.
-        //Otherwise, we'll skip adding it, since it's nearly linearly
-        //dependent with the existing set of vectors.
-        let to_add_length = to_add.norm_l2();
-        if (to_add_length > min_length) {
-            to_add *= 1.0f32 / to_add_length;
-            //Presumably orthonormal now, throw it on
-            self.0.push(to_add);
-        }
-    }
-    pub fn to_orthonormal_matrix(self) -> Array2<f32> {
-        let views : Vec<ArrayView1<f32>> = self.0.iter()
-                          .map(|x| x.view())
-                          .collect();
-        stack(Axis(0), &views).unwrap()
-    }
-}
-
-pub fn derive_orthonormal_basis_change_from_target_matrix(target_matrix : ArrayView2<f32>) -> Array2<f32> {
-    let (u, sigma, vt) = target_matrix.svd(true, true).unwrap();
-    let u = u.unwrap();
-    let vt = vt.unwrap();
-    let ut = u.t();
-    //Now, with U^T and V^T, the rows are the left and right
-    //singular vectors, respectively. What we'll do is
-    //start from the pairs of singular vectors corresponding
-    //to the largest singular values, and add orthogonal vectors
-    //spanning the subspaces spanned by each left and right singular vector
-    let mut orthonormal_vector_set = OrthonormalVectorSet(Vec::new());
-    for i in 0..ut.shape()[0] {
-        let u_vec = ut.row(i);
-        let v_vec = vt.row(i);
-
-        let avg_vec = 0.5f32 * &u_vec + 0.5f32 * &v_vec;
-        //Directionality is from input toward output
-        let diff_vec = &u_vec - &v_vec;
-
-        let dot_product = u_vec.dot(&v_vec);
-
-        if (dot_product > 0.0) {
-            //Same directionality, so the average will capture
-            //the vectors better than the difference
-            orthonormal_vector_set.add_to_span(avg_vec);
-            orthonormal_vector_set.add_to_span(diff_vec);
-        } else {
-            //Opposite directionality, so the difference will
-            //capture the vectors better than their average
-            orthonormal_vector_set.add_to_span(diff_vec);
-            orthonormal_vector_set.add_to_span(avg_vec);
-        }
-    }
-    //Rows are in decreasing order of "importance", roughly.
-    let orthonormal_matrix = orthonormal_vector_set.to_orthonormal_matrix();
-
-    let (rows, cols) = (orthonormal_matrix.shape()[0], orthonormal_matrix.shape()[1]);
-    if (rows != cols) {
-        println!("Whoa there bucko {}, {}", rows, cols);
-    }
-
-    //Transpose the result, since we want to transform from
-    //the shifted coordinate space back to the original one
-    let orthonormal_matrix = orthonormal_matrix.t().clone();
-    orthonormal_matrix.to_owned()
- }
-
 impl AnnotatedGamePath {
-    pub fn derive_orthonormal_basis_change(&self) -> Array2<f32> {
-        derive_orthonormal_basis_change_from_target_matrix(self.target_matrix.view())
+    pub fn get_num_turns(&self) -> usize {
+        self.nodes.len()
     }
-    pub fn apply_orthonormal_basis_change(mut self, Q : ArrayView2<f32>) -> Self {
-        let matrix_set = self.matrix_set.apply_orthonormal_basis_change(Q);
-        let target_matrix = Q.t().dot(&self.target_matrix).dot(&Q);
-        let nodes = self.nodes.drain(..)
-                              .map(|x| x.apply_orthonormal_basis_change(Q))
-                              .collect();
-        AnnotatedGamePath {
-            matrix_set,
-            target_matrix,
-            nodes
-        }
+    pub fn get_initial_set_size(&self) -> usize {
+        self.initial_set_size
     }
+}
+
+pub fn apply_orthonormal_basis_change(matrices : Tensor, Q : Tensor) -> Tensor {
+    //Q.t().dot(matrices).dot(Q)
+    unimplemented!();
+}
+
+/// N x M x M -> N x M x M
+pub fn derive_orthonormal_basis_changes_from_target_matrices(target_matrices : &Tensor) -> Tensor {
+    let _guard = no_grad_guard();
+    let n = target_matrices.size()[0];
+    let m = target_matrices.size()[1];
+    //TODO: May want schur decomposition instead here,
+    //or possibly a smarter algorithm which actually produces
+    //the best dominant subspaces
+    let transposed = target_matrices.transpose(1, 2);
+    let symmetrized : Tensor = 0.5 * transposed + 0.5 * target_matrices;
+    let antisymmetrized = target_matrices - &symmetrized;
+    //Eigenvalues are default-sorted ascending
+    //eigenvalues : N x M, eigenvectors : N x M x M - cols are eigenvectors
+    let (eigenvalues, eigenvectors) = symmetrized.linalg_eigh("U");
+    //Rows are eigenvectors
+    let eigenvectors = eigenvectors.transpose(1, 2);
+
+    //Find permutation matrices to sort eigenvalues in descending order of absolute value
+    let abs_eigenvalues = eigenvalues.abs();
+    //N x M, indices of sorted elements
+    let sort_indices = abs_eigenvalues.argsort(1, true);
+    //N x M x M, indices of sorted elements repeated so we can use a gather
+    let sort_indices = sort_indices.unsqueeze(2);
+    let sort_indices = sort_indices.expand(&[-1, -1, m], false);
+    
+    //Now, permute eigenvectors to match the abs eigenvalues' new ordering
+    //N x M x M, rows are eigenvectors
+    let eigenvectors = eigenvectors.gather(1, &sort_indices, false);
+    let Q_T = eigenvectors.shallow_clone();
+    let Q = eigenvectors.transpose(1, 2);
+
+    //Finally, we need to resolve the * +-1 factor for each of the eigenvectors.
+    //We do this by trial-transforming the antisymmetric part, and then ensuring
+    //that all of the row-sums are positive
+    //N x M x M
+    let trial_transformed = Q_T.matmul(&antisymmetrized).matmul(&Q);
+    let trial_sums = trial_transformed.sum_dim_intlist(Some(&[2 as i64] as &[i64]), false, Kind::Float);
+    //N x M
+    let trial_signs = trial_sums.sign();
+    //Fix up the signs so that we map zeroes -> 1, so it's only -1/+1
+    let trial_signs = (trial_signs + 0.5).sign();
+    //Expand the trial signs to be the same size as the eigenvectors
+    let trial_signs = trial_signs.unsqueeze(2);
+    let trial_signs = trial_signs.expand(&[-1, -1, m], false);
+
+    //Use the trial signs to determine the orientation
+    let eigenvectors = trial_signs * eigenvectors;
+    let Q_T = eigenvectors.shallow_clone();
+    let Q = eigenvectors.transpose(1, 2);
+
+    Q
 }
 
 impl GamePathNode {
-    pub fn annotate(self, child_visit_probabilities : Array2<f32>,
-                               added_matrix : Array2<f32>) -> AnnotatedGamePathNode {
+    pub fn annotate(self, child_visit_probabilities : Array2<f32>) -> AnnotatedGamePathNode {
         AnnotatedGamePathNode {
             left_index : self.left_index,
             right_index : self.right_index,
             child_visit_probabilities,
-            added_matrix
         }
     }
 }
 
 
 impl GamePath {
-    pub fn new(matrix_set : MatrixSet) -> GamePath {
-        GamePath {
-            matrix_set,
-            nodes : Vec::new()
+    pub fn new(initial_set_size : usize) -> Self {
+        Self {
+            initial_set_size,
+            nodes : Vec::new(),
         }
     }
 
     pub fn annotate_path(mut self) -> AnnotatedGamePath {
-        let MatrixSet(added_matrices) = self.get_added_matrices();
-        //Lop off the beginning, we don't care
-        let mut added_matrices = added_matrices[self.get_initial_set_size()..].to_vec();
-
         let mut child_visit_probabilities_by_added_node = self.get_child_visit_probabilities_by_added_node();
         let mut annotated_nodes = Vec::new();
 
-        for ((node, child_visit_probabilities), added_matrix) in self.nodes.drain(..)
-                                                 .zip(child_visit_probabilities_by_added_node.drain(..))
-                                                 .zip(added_matrices.drain(..)) {
-            let annotated_node = node.annotate(child_visit_probabilities, added_matrix);
+        for (node, child_visit_probabilities) in self.nodes.drain(..)
+                                                 .zip(child_visit_probabilities_by_added_node.drain(..)) {
+            let annotated_node = node.annotate(child_visit_probabilities);
             annotated_nodes.push(annotated_node);
         }
-        let target_matrix = annotated_nodes[annotated_nodes.len() - 1].added_matrix.clone();
 
         AnnotatedGamePath {
-            matrix_set : self.matrix_set,
-            target_matrix,
+            initial_set_size : self.initial_set_size,
             nodes : annotated_nodes
         }
     }
@@ -365,28 +308,9 @@ impl GamePath {
             self.nodes = updated_nodes;
         }
     }
-
-    fn get_added_matrices(&self) -> MatrixSet {
-        let mut result = self.matrix_set.clone();
-        for node in self.nodes.iter() {
-            let added_matrix = {
-                let left_matrix = result.get(node.left_index);
-                let right_matrix = result.get(node.right_index);
-                left_matrix.dot(&right_matrix)
-            };
-            result = result.add_matrix(added_matrix);
-        }
-        result
-    }
-
-    pub fn get_target(&self) -> Array2<f32> {
-        let added_matrices = self.get_added_matrices();
-        added_matrices.get_newest_matrix().to_owned()
-    }
-
+    
     pub fn get_initial_set_size(&self) -> usize {
-        let MatrixSet(matrices) = &self.matrix_set;
-        matrices.len()
+        self.initial_set_size
     }
 
     pub fn get_size(&self) -> usize {
@@ -453,17 +377,17 @@ impl GamePath {
         self.add_node(left_index, right_index)
     }
     
-    pub fn generate_game_path<R : Rng + ?Sized>(matrix_set : MatrixSet, 
+    pub fn generate_game_path<R : Rng + ?Sized>(initial_set_size : usize, 
                                                 ground_truth_num_moves : usize,
                                                 rng : &mut R) -> GamePath {
         //let iter_bound = ground_truth_num_moves;
         //TODO: There's probably a sensible bound to create?
-        let iter_bound = matrix_set.len() + ground_truth_num_moves;
+        let iter_bound = initial_set_size + ground_truth_num_moves;
         let iter_bound = iter_bound * iter_bound;
         //Repeatedly try generating a game path
         loop {
             let mut already_added_pairs = HashSet::new();
-            let mut result = GamePath::new(matrix_set.clone());
+            let mut result = GamePath::new(initial_set_size);
             //Generate a bunch of potential moves until one's cumulative number
             //of turns under it matches what we wanted to generate.
             for _ in 0..iter_bound {

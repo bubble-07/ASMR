@@ -10,7 +10,9 @@ use std::convert::{TryFrom, TryInto};
 use std::path::Path;
 use crate::params::*;
 use crate::network_config::*;
+use crate::rollout_states::*;
 use crate::synthetic_data::*;
+use crate::playout_sketches::*;
 
 ///Structure containing a collection of playouts which
 ///all have the same starting set-size and the same length in turns
@@ -21,12 +23,8 @@ pub struct PlayoutBundle {
     pub flattened_initial_matrix_sets : Tensor,
     ///Dims NxM
     pub flattened_matrix_targets : Tensor,
-    ///L-element list of tensors of dims Nx([K+i]*[K+i]) for i from 0 to L
-    pub child_visit_probabilities : Vec<Tensor>,
-    ///NxL index tensor for left matrix index chosen for the next move
-    pub left_matrix_indices : Tensor,
-    ///NxL index tensor for right matrix index chosen for next move
-    pub right_matrix_indices : Tensor,
+    ///The sketches that we've specified starting+ending matrices for
+    pub sketch_bundle : PlayoutSketchBundle,
 }
 
 fn remove(named_tensor_map : &mut HashMap<String, Tensor>, key : &str) -> Result<Tensor, String> {
@@ -34,17 +32,104 @@ fn remove(named_tensor_map : &mut HashMap<String, Tensor>, key : &str) -> Result
 }
 
 impl PlayoutBundle {
+    pub fn to_device(&self, device : Device) -> Self {
+        let flattened_initial_matrix_sets = self.flattened_initial_matrix_sets.to_device(device);
+        let flattened_matrix_targets = self.flattened_matrix_targets.to_device(device);
+        let sketch_bundle = self.sketch_bundle.to_device(device);
+        Self {
+            flattened_initial_matrix_sets,
+            flattened_matrix_targets,
+            sketch_bundle,
+        }
+    }
+    pub fn standardize(&self) -> PlayoutBundle {
+        let n = self.get_num_playouts() as i64;
+        let k = self.get_init_set_size() as i64;
+        let m = self.flattened_matrix_targets.size()[1];
+        let m_sqrt = (m as f64).sqrt() as i64;
+        let reshaped_matrix_targets = self.flattened_matrix_targets.reshape(&[n, m_sqrt, m_sqrt]);
+
+        //N x M_sqrt x M_sqrt
+        let Q = derive_orthonormal_basis_changes_from_target_matrices(&reshaped_matrix_targets);
+        let Q_T = Q.transpose(1, 2); 
+
+        let transformed_matrix_targets = Q_T.matmul(&reshaped_matrix_targets).matmul(&Q);
+
+        let Q = Q.reshape(&[n, 1, m_sqrt, m_sqrt]);
+        let Q_T = Q_T.reshape(&[n, 1, m_sqrt, m_sqrt]);
+
+        let reshaped_initial_matrix_sets = self.flattened_initial_matrix_sets.reshape(&[n, k, m_sqrt, m_sqrt]);
+        
+        let transformed_initial_matrix_sets = Q_T.matmul(&reshaped_initial_matrix_sets).matmul(&Q);
+
+        let flattened_initial_matrix_sets = transformed_initial_matrix_sets.reshape(&[n, k, m]);
+        let flattened_matrix_targets = transformed_matrix_targets.reshape(&[n, m]);
+        
+        let sketch_bundle = self.sketch_bundle.shallow_clone();
+
+        Self {
+            flattened_initial_matrix_sets,
+            flattened_matrix_targets,
+            sketch_bundle,
+        }
+    }
+    ///Lifts a PlayoutSketchBundle to a PlayoutBundle by selecting random
+    ///starting matrices acording to the passed parameters
+    pub fn from_sketch_bundle(params : &Params, sketch_bundle : PlayoutSketchBundle) -> Self {
+        let num_playouts = sketch_bundle.get_num_playouts() as i64;
+        let init_set_size = sketch_bundle.get_init_set_size() as i64;
+        let flattened_matrix_dim = params.get_flattened_matrix_dim();
+
+        //Generate N * K random matrices
+        let num_random_matrices = num_playouts * init_set_size;
+        //Dims (N * K) x sqrt(M) x sqrt(M)
+        let random_matrices = params.generate_random_matrices(num_random_matrices as usize);
+        let flattened_initial_matrix_sets = random_matrices.reshape(&[num_playouts, init_set_size, flattened_matrix_dim]);
+
+        
+        //Generate some matrices of zeroes for an initial fake 'target'
+        //TODO: We could remove the need for extra computations here by adding an
+        //extra layer of abstraction around rollouts with targets vs rollouts without
+        let targets_dim = [num_playouts, flattened_matrix_dim];
+        let fake_targets = Tensor::zeros(&targets_dim, (Kind::Float, sketch_bundle.device()));
+
+        //We'll fix up the playout bundle's target, no worries
+        let mut result = PlayoutBundle {
+            flattened_initial_matrix_sets,
+            flattened_matrix_targets : fake_targets,
+            sketch_bundle,
+        };
+        let mut target_finding_rollout = RolloutStates::from_playout_bundle_initial_state(&result);
+
+        let mut left_matrix_indices = result.sketch_bundle.left_matrix_indices.unbind(1);
+        left_matrix_indices.reverse();
+
+        let mut right_matrix_indices = result.sketch_bundle.right_matrix_indices.unbind(1);
+        right_matrix_indices.reverse();
+        //Roll forward the target-finding rollout 
+        let playout_length = result.get_playout_length();
+        for i in 0..(playout_length - 1) {
+            let left_indices = left_matrix_indices.pop().unwrap();
+            let right_indices = right_matrix_indices.pop().unwrap();
+            target_finding_rollout = target_finding_rollout.manual_step(&left_indices, &right_indices);
+        }
+        //Perform the final step, for which we'll only need the diff
+        let left_indices = left_matrix_indices.pop().unwrap();
+        let right_indices = right_matrix_indices.pop().unwrap();
+        let final_step_diff = target_finding_rollout.perform_moves_diff(&left_indices, &right_indices);
+
+        result.flattened_matrix_targets = final_step_diff.matrices.reshape(&targets_dim);
+
+        result
+    }
     pub fn device(&self) -> Device {
-        self.left_matrix_indices.device()
+        self.sketch_bundle.device()
     }
     pub fn get_init_set_size(&self) -> usize {
         self.flattened_initial_matrix_sets.size()[1] as usize
     }
-    pub fn get_num_playouts(&self) -> usize {
-        self.left_matrix_indices.size()[0] as usize
-    }
     pub fn get_playout_length(&self) -> usize {
-        self.left_matrix_indices.size()[1] as usize
+        self.sketch_bundle.get_playout_length()
     }
     pub fn get_final_set_size(&self) -> usize {
         self.get_init_set_size() + self.get_playout_length()
@@ -52,88 +137,62 @@ impl PlayoutBundle {
     pub fn get_flattened_matrix_dim(&self) -> usize {
         self.flattened_matrix_targets.size()[1] as usize
     }
-    pub fn grab_batch(&self, batch_index_range : Range<i64>, device : Device) -> PlayoutBundle {
+    fn concat_consume(a : Tensor, b : Tensor) -> Tensor {
+        let result = Tensor::cat(&[a, b], 0);
+        result
+    }
+}
+impl PlayoutBundleLike for PlayoutBundle {
+    fn get_num_playouts(&self) -> usize {
+        self.sketch_bundle.get_num_playouts()
+    }
+    fn grab_batch(&self, batch_index_range : Range<i64>, device : Device) -> PlayoutBundle {
         let flattened_initial_matrix_sets = self.flattened_initial_matrix_sets.i(batch_index_range.clone())
                                                 .to_device(device).detach();
 
         let flattened_matrix_targets = self.flattened_matrix_targets.i(batch_index_range.clone())
                                        .to_device(device).detach();
 
-        let child_visit_probabilities : Vec<Tensor> = self.child_visit_probabilities.iter()
-                                  .map(|x|
-                                        x.i(batch_index_range.clone()).to_device(device).detach())
-                                  .collect();
-        
-        let left_matrix_indices = self.left_matrix_indices.i(batch_index_range.clone())
-                                      .to_device(device).to_kind(Kind::Int64).detach();
-
-        let right_matrix_indices = self.right_matrix_indices.i(batch_index_range.clone())
-                                      .to_device(device).to_kind(Kind::Int64).detach();
+        let sketch_bundle = self.sketch_bundle.grab_batch(batch_index_range, device);
 
         PlayoutBundle {
             flattened_initial_matrix_sets,
             flattened_matrix_targets,
-            child_visit_probabilities,
-            left_matrix_indices,
-            right_matrix_indices
+            sketch_bundle,
         }
     }
-    fn concat_consume(a : Tensor, b : Tensor) -> Tensor {
-        let result = Tensor::cat(&[a, b], 0);
-        result
-    }
-    pub fn merge(mut self, mut other : Self) -> Self {
+    fn merge(mut self, mut other : Self) -> Self {
         let _guard = no_grad_guard();
         let flattened_initial_matrix_sets = Self::concat_consume(self.flattened_initial_matrix_sets,
                                                                   other.flattened_initial_matrix_sets);
         let flattened_matrix_targets = Self::concat_consume(
                 self.flattened_matrix_targets, other.flattened_matrix_targets);
 
-        let child_visit_probabilities =
-            self.child_visit_probabilities.drain(..)
-            .zip(other.child_visit_probabilities.drain(..))
-                .map(|(a, b)| Self::concat_consume(a, b))
-                .collect();
-
-        let left_matrix_indices = Self::concat_consume(
-                self.left_matrix_indices, other.left_matrix_indices);
-
-        let right_matrix_indices = Self::concat_consume(
-                self.right_matrix_indices, other.right_matrix_indices);
+        let sketch_bundle = self.sketch_bundle.merge(other.sketch_bundle);
 
         PlayoutBundle {
             flattened_initial_matrix_sets,
             flattened_matrix_targets,
-            child_visit_probabilities,
-            left_matrix_indices,
-            right_matrix_indices
+            sketch_bundle,
         }
     }
-    pub fn serialize(mut self, prefix : String) -> Vec<(String, Tensor)> {
+    fn serialize(mut self, prefix : String) -> Vec<(String, Tensor)> {
         let mut result = Vec::new();         
+
+        let mut sketch_entries = self.sketch_bundle.serialize(prefix.clone());
 
         result.push((format!("{}_initial_matrix_sets", prefix),
                      self.flattened_initial_matrix_sets));
 
         result.push((format!("{}_flattened_matrix_targets", prefix),
                     self.flattened_matrix_targets));
-        
-        let num_child_visit_probability_tensors = self.child_visit_probabilities.len();
-        for (child_visit_probabilities, i) in self.child_visit_probabilities.drain(..)
-                                              .zip(0..num_child_visit_probability_tensors) {
-            let name = format!("{}_child_visit_probabilities_{}", prefix, i);
-            result.push((name, child_visit_probabilities));
-        }
 
-        result.push((format!("{}_left_matrix_indices", prefix),
-                    self.left_matrix_indices));
-        result.push((format!("{}_right_matrix_indices", prefix),
-                    self.right_matrix_indices));
+        result.append(&mut sketch_entries);
 
         result
     }
 
-    pub fn load(named_tensor_map : &mut HashMap<String, Tensor>, key : (usize, usize))
+    fn load(named_tensor_map : &mut HashMap<String, Tensor>, key : (usize, usize))
            -> Result<Self, String> {
         let (initial_set_size, playout_length) = key;
         let prefix = format!("{}_{}", initial_set_size, playout_length);
@@ -143,36 +202,33 @@ impl PlayoutBundle {
 
         let flattened_matrix_targets = remove(named_tensor_map,
                                        &format!("{}_flattened_matrix_targets", prefix))?;
+        
+        let sketch_bundle = PlayoutSketchBundle::load(named_tensor_map, key)?;
 
-        let mut child_visit_probabilities = Vec::new();
-        for i in 0..playout_length {
-            let name = format!("{}_child_visit_probabilities_{}", prefix, i);
-            let tensor = remove(named_tensor_map, &name)?;
-            child_visit_probabilities.push(tensor);
-        }
-        
-        let left_matrix_indices = remove(named_tensor_map,
-                                  &format!("{}_left_matrix_indices", prefix))?;
-        
-        let right_matrix_indices = remove(named_tensor_map,
-                                  &format!("{}_right_matrix_indices", prefix))?;
         Result::Ok(PlayoutBundle {
             flattened_initial_matrix_sets,
             flattened_matrix_targets,
-            child_visit_probabilities,
-            left_matrix_indices,
-            right_matrix_indices
+            sketch_bundle,
         })
     }
 }
 
-pub struct TrainingExamples {
-    ///Mapping from (init set size, playout length) to playout bundles
-    pub playout_bundles : HashMap<(usize, usize), PlayoutBundle>
+pub trait PlayoutBundleLike : Sized {
+    fn get_num_playouts(&self) -> usize;
+    fn grab_batch(&self, batch_index_range : Range<i64>, device : Device) -> Self;
+    fn merge(self, other : Self) -> Self;
+    fn serialize(self, prefix : String) -> Vec<(String, Tensor)>;
+    fn load(named_tensor_map : &mut HashMap<String, Tensor>, key : (usize, usize))
+        -> Result<Self, String>;
 }
 
-impl TrainingExamples {
-    pub fn merge(&mut self, mut other : TrainingExamples) {
+pub struct TrainingExamples<BundleType : PlayoutBundleLike> {
+    ///Mapping from (init set size, playout length) to playout bundles
+    pub playout_bundles : HashMap<(usize, usize), BundleType>,
+}
+
+impl <BundleType : PlayoutBundleLike> TrainingExamples<BundleType> {
+    pub fn merge(&mut self, mut other : TrainingExamples<BundleType>) {
         for (key, other_value) in other.playout_bundles.drain() {
             if (self.playout_bundles.contains_key(&key)) {
                 let my_value = self.playout_bundles.remove(&key).unwrap();
@@ -212,7 +268,7 @@ impl TrainingExamples {
             Result::Err(err) => Result::Err(format!("Could not save training examples: {}", err))
         }
     }
-    pub fn load<T : AsRef<Path>>(path : T, device : Device) -> Result<TrainingExamples, String> {
+    pub fn load<T : AsRef<Path>>(path : T, device : Device) -> Result<Self, String> {
         let mut named_tensors = Tensor::load_multi_with_device(path, device)
                                        .map_err(|err| format!("Error unbundling: {}", err))?;
 
@@ -233,164 +289,11 @@ impl TrainingExamples {
             let initial_set_size = initial_set_sizes[i] as usize;
             let playout_length = playout_lengths[i] as usize;
             let key = (initial_set_size, playout_length);
-            let playout_bundle = PlayoutBundle::load(&mut named_tensor_map, key)?;
+            let playout_bundle = BundleType::load(&mut named_tensor_map, key)?;
             result.insert(key, playout_bundle);
         }
         Result::Ok(TrainingExamples {
             playout_bundles : result
         })
-    }
-}
-
-pub struct TrainingExamplesBuilder {
-    ///Mapping from (init set size, playout length) to playout bundles
-    pub playout_bundles : HashMap<(usize, usize), PlayoutBundleBuilder>,
-    pub m : usize
-}
-
-pub struct PlayoutBundleBuilder {
-    pub playouts : Vec<PlayoutBuilder>,
-}
-
-
-impl PlayoutBundleBuilder {
-    pub fn new() -> Self {
-        PlayoutBundleBuilder {
-            playouts : Vec::new(),
-        }
-    }
-    fn construct_tensor<T : Element>(value : Vec<T>, dims : &[i64]) -> Tensor {
-        let unshaped = Tensor::try_from(value).unwrap();
-        let shaped = unshaped.reshape(dims);
-        shaped
-    }
-    pub fn add_annotated_game_path(&mut self, annotated_game_path : AnnotatedGamePath) {
-        let playout_bundle = PlayoutBuilder::from_annotated_game_path(annotated_game_path);
-        self.playouts.push(playout_bundle);
-    }
-    pub fn build(mut self, k : usize, l : usize, m : usize) -> PlayoutBundle {
-        let n = self.playouts.len();
-
-        //Capacity reservation
-        let mut flattened_initial_matrix_sets = Vec::with_capacity(n * k * m);
-        let mut flattened_matrix_targets = Vec::with_capacity(n * m);
-        let mut child_visit_probabilities = Vec::new();
-        for i in 0..l {
-            let dim = k + i;
-            let child_visit_probabilities_entry = Vec::with_capacity(n * dim * dim);
-            child_visit_probabilities.push(child_visit_probabilities_entry);
-        }
-        let mut left_matrix_indices = Vec::with_capacity(n * l);
-        let mut right_matrix_indices = Vec::with_capacity(n * l);
-
-        //Appending
-        for mut playout in self.playouts.drain(..) {
-            flattened_initial_matrix_sets.append(&mut playout.flattened_initial_matrix_set);
-            flattened_matrix_targets.append(&mut playout.flattened_matrix_target);
-            for i in 0..l {
-                child_visit_probabilities[i].append(&mut playout.child_visit_probabilities[i]);
-            }
-            left_matrix_indices.append(&mut playout.left_matrix_indices);
-            right_matrix_indices.append(&mut playout.right_matrix_indices);
-        }
-
-        let n = n as i64;
-        let k = k as i64;
-        let l = l as i64;
-        let m = m as i64;
-
-        //Creating tensors
-        let flattened_initial_matrix_sets = Self::construct_tensor(flattened_initial_matrix_sets, &[n, k, m]);
-        let flattened_matrix_targets = Self::construct_tensor(flattened_matrix_targets, &[n, m]);
-
-        let mut child_visit_probabilities_tensored = Vec::new();
-        for (child_visit_array, i) in child_visit_probabilities.drain(..).zip(0..l) {
-            let dim = k + i;
-            let child_visit_probabilities_entry = Self::construct_tensor(child_visit_array, &[n, dim, dim]);
-            child_visit_probabilities_tensored.push(child_visit_probabilities_entry);
-        }
-        let child_visit_probabilities = child_visit_probabilities_tensored; 
-        
-        let left_matrix_indices = Self::construct_tensor(left_matrix_indices, &[n, l]);
-        let right_matrix_indices = Self::construct_tensor(right_matrix_indices, &[n, l]);
-
-        PlayoutBundle {
-            flattened_initial_matrix_sets,
-            flattened_matrix_targets,
-            child_visit_probabilities,
-            left_matrix_indices,
-            right_matrix_indices
-        }
-    }
-    pub fn shuffle<R : Rng + ?Sized>(&mut self, rng : &mut R) {
-        self.playouts.shuffle(rng);
-    }
-}
-
-pub struct PlayoutBuilder {
-    ///Dims: K x M
-    pub flattened_initial_matrix_set : Vec<f32>,
-    ///Dims: M
-    pub flattened_matrix_target : Vec<f32>,
-    ///Dims: L x (K+i) x (K+i) for i in [0, L)
-    pub child_visit_probabilities : Vec<Vec<f32>>,
-    ///Dims: L
-    pub left_matrix_indices : Vec<u8>,
-    ///Dims: L
-    pub right_matrix_indices : Vec<u8>
-}
-
-impl PlayoutBuilder {
-    pub fn from_annotated_game_path(mut annotated_game_path : AnnotatedGamePath) -> Self {
-        let flattened_initial_matrix_set = annotated_game_path.matrix_set.to_flattened_vec();
-        let flattened_matrix_target = annotated_game_path.target_matrix.into_raw_vec();
-        
-        let mut left_matrix_indices = Vec::new();
-        let mut right_matrix_indices = Vec::new();
-        let mut child_visit_probabilities = Vec::new();
-        for node in annotated_game_path.nodes.drain(..) {
-            left_matrix_indices.push(node.left_index as u8);
-            right_matrix_indices.push(node.right_index as u8);
-            child_visit_probabilities.push(node.child_visit_probabilities.into_raw_vec());
-        }
-
-        PlayoutBuilder {
-            flattened_initial_matrix_set,
-            flattened_matrix_target,
-            left_matrix_indices,
-            right_matrix_indices,
-            child_visit_probabilities
-        }
-    }
-}
-
-impl TrainingExamplesBuilder {
-    pub fn new(params : &Params) -> TrainingExamplesBuilder {
-        let playout_bundles = HashMap::new();
-        let m = params.get_flattened_matrix_dim() as usize;
-        TrainingExamplesBuilder {
-            playout_bundles,
-            m
-        }
-    }
-    pub fn add_annotated_game_path(&mut self, annotated_game_path : AnnotatedGamePath) {
-        let init_set_size = annotated_game_path.matrix_set.len();
-        let playout_length = annotated_game_path.nodes.len();
-        let key = (init_set_size, playout_length);
-        if !self.playout_bundles.contains_key(&key) {
-            self.playout_bundles.insert(key, PlayoutBundleBuilder::new());
-        }
-        self.playout_bundles.get_mut(&key).unwrap().add_annotated_game_path(annotated_game_path);
-    }
-    pub fn build(mut self) -> TrainingExamples {
-        let mut playout_bundles = HashMap::new();
-        for (size_key, playout_bundle_builder) in self.playout_bundles.drain() {
-            let (k, l) = size_key;
-            let playout_bundle = playout_bundle_builder.build(k, l, self.m);
-            playout_bundles.insert(size_key, playout_bundle);
-        }
-        TrainingExamples {
-            playout_bundles
-        }
     }
 }
