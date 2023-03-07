@@ -3,6 +3,7 @@
 #![allow(unused_imports)]
 #![allow(unused_parens)]
 
+mod matrix_bundle;
 mod validation_set;
 mod playout_sketches;
 mod network_game_tree;
@@ -524,7 +525,7 @@ fn display_training_data_stats_command(_params : Params, training_data_input_pat
         let num_examples = playout_bundle.get_num_playouts();
         let mut string = format!("N: {}, Init Set Size: {}, Playout length: {}\n", 
                                  num_examples, init_set_size, playout_length);
-        let matrix_target_elements : Vec<f32> = playout_bundle.flattened_matrix_targets.into();
+        let matrix_target_elements : Vec<f32> = playout_bundle.matrix_bundle.flattened_matrix_targets.into();
         let std_dev = statistical::standard_deviation(&matrix_target_elements, None);
         string += format!("\tTarget matrix std_dev: {}\n", std_dev).as_str();
         let final_set_size = init_set_size + playout_length;

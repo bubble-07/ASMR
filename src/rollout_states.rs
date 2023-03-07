@@ -251,19 +251,19 @@ impl RolloutStates {
     pub fn from_playout_bundle_initial_state(playout_bundle : &PlayoutBundle) -> RolloutStates {
         let _guard = no_grad_guard();
 
-        let s = playout_bundle.flattened_initial_matrix_sets.size();
+        let s = playout_bundle.matrix_bundle.flattened_initial_matrix_sets.size();
         let (n, k, m_squared) = (s[0], s[1], s[2]);
         let remaining_turns = playout_bundle.sketch_bundle.left_matrix_indices.size()[1] as usize;
         let m = (m_squared as f64).sqrt() as i64;
 
-        let matrices = playout_bundle.flattened_initial_matrix_sets.reshape(&[n, k, m, m]);
-        let flattened_targets = playout_bundle.flattened_matrix_targets.shallow_clone();
+        let matrices = playout_bundle.matrix_bundle.flattened_initial_matrix_sets.reshape(&[n, k, m, m]);
+        let flattened_targets = playout_bundle.matrix_bundle.flattened_matrix_targets.shallow_clone();
 
         //Now just need to derive the initial min_distances
         let reshaped_targets = flattened_targets.reshape(&[n, 1, m_squared]);
 
         //N x K x (M * M)
-        let differences = &reshaped_targets - &playout_bundle.flattened_initial_matrix_sets;
+        let differences = &reshaped_targets - &playout_bundle.matrix_bundle.flattened_initial_matrix_sets;
         let squared_differences = differences.square();
         //N x K
         let distances = squared_differences.sum_dim_intlist(Some(&[1 as i64] as &[i64]), false, Kind::Float);

@@ -3,8 +3,11 @@ use tch::{no_grad_guard, nn, nn::Init, nn::Module, Tensor, nn::Sequential, kind:
 use std::collections::HashMap;
 use rand::Rng;
 use std::ops::Range;
+use std::iter::zip;
+use crate::playout_sketches::*;
 use crate::training_examples::*;
 use crate::batch_split::*;
+use crate::params::*;
 
 pub struct BatchSplitPlayoutBundle<BundleType : PlayoutBundleLike> {
     pub playout_bundle : BundleType,
@@ -33,6 +36,52 @@ impl <'a, BundleType : PlayoutBundleLike> Iterator for ValidationBatchIterator<'
                 (weight, playout_bundle)
             }).collect();
         Option::Some(step_result)
+    }
+}
+
+impl BatchSplitTrainingExamples<PlayoutSketchBundle> {
+    pub fn iter_playout_bundle_training_batches<'a, R : Rng + ?Sized>(&'a self, params : &'a Params, 
+                                                                      rng : &'a mut R) ->
+                                impl Iterator<Item = (f64, PlayoutBundle)> + 'a {
+        let device = params.get_device();
+
+        //Step 1: Draw batches and reorganize to bunch together bundles with the same starting set size
+        let mut batch_bundles_by_starting_set_size = HashMap::new();
+        for (key, full_batch_split_sketches) in self.training_examples.iter() {
+            let (init_set_size, _) = key;
+            let maybe_batch_index_range = full_batch_split_sketches.batch_split.grab_training_batch(rng);
+            if maybe_batch_index_range.is_none() {
+                continue;
+            }
+            let batch_index_range = maybe_batch_index_range.unwrap();
+            let weight = full_batch_split_sketches.weight; 
+            let playout_sketch_bundle_batch = full_batch_split_sketches.playout_bundle.grab_batch(batch_index_range, device);
+
+            if !batch_bundles_by_starting_set_size.contains_key(&init_set_size) {
+                batch_bundles_by_starting_set_size.insert(init_set_size, Vec::new());
+            }
+            let mut entries = batch_bundles_by_starting_set_size.get_mut(&init_set_size).unwrap();
+            entries.push((weight, playout_sketch_bundle_batch));
+        }
+
+        //Step 2: Loop through the different initial set sizes and generate matrices
+        batch_bundles_by_starting_set_size.into_iter().flat_map(move |(init_set_size, mut entries)| {
+            let num_matrices_by_entry : Vec<_> = entries.iter()
+                                           .map(|(_, playout_sketch_bundle)| {
+                                               (init_set_size * playout_sketch_bundle.get_num_playouts()) as i64
+                                            })
+                                           .collect();
+            let total_num_matrices = num_matrices_by_entry.iter().sum::<i64>() as usize;
+            let random_matrices = params.generate_random_matrices(total_num_matrices);
+            let random_matrices_split = random_matrices.split_with_sizes(num_matrices_by_entry.as_slice(), 0);
+
+            zip(entries.into_iter(), random_matrices_split)
+            .map(|(entry, random_matrices)| {
+                let (weight, playout_sketch_bundle) = entry;
+                let playout_bundle = PlayoutBundle::from_initial_matrices_and_sketch_bundle(random_matrices, playout_sketch_bundle);
+                (weight, playout_bundle)
+            })
+        })
     }
 }
 

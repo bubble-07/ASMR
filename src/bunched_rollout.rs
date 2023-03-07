@@ -5,6 +5,7 @@ use crate::network_rollout::*;
 use crate::network_config::*;
 use crate::playout_sketches::*;
 use crate::rollout_states::*;
+use crate::matrix_bundle::*;
 use crate::params::*;
 use std::iter::zip;
 
@@ -190,14 +191,29 @@ pub fn get_loss_for_playout_bundles(network_config : &NetworkConfig, params : &P
             bundles_for_size.push(bundle);
             weights_for_size.push(weight);
         }
+        //Determine the sizes of all the rollout states
+        let batch_sizes : Vec<i64> = bundles_for_size.iter().map(|x| x.get_num_playouts() as i64).collect();
+
+
+        //Merge all the matrices for the bundles and standardize 'em
+        let mut matrix_bundles_for_size = Vec::new();
+        for bundle in &bundles_for_size {
+            matrix_bundles_for_size.push(bundle.matrix_bundle.shallow_clone());
+        }
+        let merged_matrix_bundle = MatrixBundle::merge_all(matrix_bundles_for_size);
+        let standardized_matrix_bundle = merged_matrix_bundle.standardize();
+        let standardized_matrix_bundles = standardized_matrix_bundle.split(&batch_sizes);
+        for (mut bundle, standardized_matrix_bundle) in zip(bundles_for_size.iter_mut(), standardized_matrix_bundles) {
+            bundle.matrix_bundle = standardized_matrix_bundle;
+        }
+
+
         //With all of the bundles of the given size together, make a combined network rollout state
         let mut rollout_states_for_size = Vec::new();
         for bundle in &bundles_for_size {
             let rollout_states = RolloutStates::from_playout_bundle_initial_state(bundle);
             rollout_states_for_size.push(rollout_states);
         }
-        //Determine the sizes of all of the rollout states
-        let batch_sizes : Vec<i64> = rollout_states_for_size.iter().map(|x| x.get_num_rollouts()).collect();
 
         let merged_rollout_state = RolloutStates::merge(rollout_states_for_size);
         let merged_network_rollout = NetworkRolloutState::from_rollout_states(network_config, merged_rollout_state);

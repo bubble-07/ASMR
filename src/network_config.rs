@@ -128,10 +128,7 @@ impl NetworkConfig {
         //First, train
         for _ in 0..num_iters {
             opt.zero_grad();
-            let batch = training_examples.iter_training_batches(rng, device)
-                                         .map(|(w, x)| (w, PlayoutBundle::from_sketch_bundle(params, x)))
-                                         .map(|(w, x)| (w, x.standardize()))
-                                         .collect();
+            let batch = training_examples.iter_playout_bundle_training_batches(params, rng).collect();
             let iter_loss = get_loss_for_playout_bundles(&self, params, batch);
 
             let iter_loss_float = f64::from(&iter_loss);

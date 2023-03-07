@@ -50,59 +50,6 @@ pub fn apply_orthonormal_basis_change(matrices : Tensor, Q : Tensor) -> Tensor {
     unimplemented!();
 }
 
-/// N x M x M -> N x M x M
-pub fn derive_orthonormal_basis_changes_from_target_matrices(target_matrices : &Tensor) -> Tensor {
-    let _guard = no_grad_guard();
-    let n = target_matrices.size()[0];
-    let m = target_matrices.size()[1];
-    //TODO: May want schur decomposition instead here,
-    //or possibly a smarter algorithm which actually produces
-    //the best dominant subspaces
-    let transposed = target_matrices.transpose(1, 2);
-    let symmetrized : Tensor = 0.5 * transposed + 0.5 * target_matrices;
-    let antisymmetrized = target_matrices - &symmetrized;
-    //Eigenvalues are default-sorted ascending
-    //eigenvalues : N x M, eigenvectors : N x M x M - cols are eigenvectors
-    let (eigenvalues, eigenvectors) = symmetrized.linalg_eigh("U");
-    //Rows are eigenvectors
-    let eigenvectors = eigenvectors.transpose(1, 2);
-
-    //Find permutation matrices to sort eigenvalues in descending order of absolute value
-    let abs_eigenvalues = eigenvalues.abs();
-    //N x M, indices of sorted elements
-    let sort_indices = abs_eigenvalues.argsort(1, true);
-    //N x M x M, indices of sorted elements repeated so we can use a gather
-    let sort_indices = sort_indices.unsqueeze(2);
-    let sort_indices = sort_indices.expand(&[-1, -1, m], false);
-    
-    //Now, permute eigenvectors to match the abs eigenvalues' new ordering
-    //N x M x M, rows are eigenvectors
-    let eigenvectors = eigenvectors.gather(1, &sort_indices, false);
-    let Q_T = eigenvectors.shallow_clone();
-    let Q = eigenvectors.transpose(1, 2);
-
-    //Finally, we need to resolve the * +-1 factor for each of the eigenvectors.
-    //We do this by trial-transforming the antisymmetric part, and then ensuring
-    //that all of the row-sums are positive
-    //N x M x M
-    let trial_transformed = Q_T.matmul(&antisymmetrized).matmul(&Q);
-    let trial_sums = trial_transformed.sum_dim_intlist(Some(&[2 as i64] as &[i64]), false, Kind::Float);
-    //N x M
-    let trial_signs = trial_sums.sign();
-    //Fix up the signs so that we map zeroes -> 1, so it's only -1/+1
-    let trial_signs = (trial_signs + 0.5).sign();
-    //Expand the trial signs to be the same size as the eigenvectors
-    let trial_signs = trial_signs.unsqueeze(2);
-    let trial_signs = trial_signs.expand(&[-1, -1, m], false);
-
-    //Use the trial signs to determine the orientation
-    let eigenvectors = trial_signs * eigenvectors;
-    let Q_T = eigenvectors.shallow_clone();
-    let Q = eigenvectors.transpose(1, 2);
-
-    Q
-}
-
 impl GamePathNode {
     pub fn annotate(self, child_visit_probabilities : Array2<f32>) -> AnnotatedGamePathNode {
         AnnotatedGamePathNode {
