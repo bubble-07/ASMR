@@ -3,6 +3,7 @@
 #![allow(unused_imports)]
 #![allow(unused_parens)]
 
+mod generate;
 mod matrix_bundle;
 mod validation_set;
 mod playout_sketches;

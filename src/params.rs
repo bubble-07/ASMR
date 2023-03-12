@@ -15,6 +15,7 @@ use crate::synthetic_data::*;
 use crate::rollout_states::*;
 use crate::training_examples::*;
 use crate::playout_sketches::*;
+use crate::generate;
 
 #[derive(Serialize, Deserialize)]
 pub struct Params {
@@ -106,44 +107,21 @@ impl Params {
         (self.matrix_dim * self.matrix_dim).try_into().unwrap()
     }
 
-    ///Dims N X M X M
+    /// Dims N X M X M
     fn generate_random_orthogonal_matrices(&self, N : usize) -> Tensor {
-        let N = N as i64;
-        let M = self.matrix_dim as i64;
-        let normal_matrix = Tensor::randn(&[N, M, M], (Kind::Float, self.get_device()));
-        //Both N x M x M
-        let (Q, R) = Tensor::linalg_qr(&normal_matrix, "reduced");
-
-        //Correct non-uniqueness of decomposition by requiring R's diagonal
-        //elements to be positive
-        //N x M
-        let D = R.diagonal(0, -2, -1);
-        let signs = D.sign();
-        //N x M x M
-        let signs = signs.unsqueeze(1);
-        let signs = signs.expand(&[-1, M, -1], true);
-        let Q = Q * signs;
-        
-        Q
+        generate::random_orthogonal_matrices(N, self.matrix_dim, self.get_device())
     }
 
     ///Dims N x M
     fn generate_random_singular_values(&self, N : usize) -> Tensor {
         let N = N as i64;
         let M = self.matrix_dim as i64;
-        let normal_values = Tensor::randn(&[N, M], (Kind::Float, self.get_device()));
-        let scaled_normal_values = self.log_normal_std_dev * normal_values;
-        scaled_normal_values.exp()
+        generate::random_log_normal(self.log_normal_std_dev, &[N, M], self.get_device())
     }
 
     ///Dims N x M x M
     pub fn generate_random_matrices(&self, N : usize) -> Tensor {
-        let U = self.generate_random_orthogonal_matrices(N);
-        let V = self.generate_random_orthogonal_matrices(N);
-        let S = self.generate_random_singular_values(N);
-        //Dims N x M x M
-        let S = S.diag_embed(0, -2, -1);
-        U.matmul(&S).matmul(&V) 
+        generate::random_log_normal_singular_value_matrices(N, self.matrix_dim, self.log_normal_std_dev, self.get_device())
     }
 
     pub fn generate_random_playout<R : Rng + ?Sized>(&self, rng : &mut R) -> PlayoutBundle {
@@ -166,8 +144,9 @@ impl Params {
 
     fn generate_ground_truth_num_moves<R : Rng + ?Sized>(&self, rng : &mut R) -> usize {
         let geom_distr = Geometric::new(self.success_probability_ground_truth_num_moves).unwrap();
-        let additional_moves_beyond_one = geom_distr.sample(rng) as usize;
-        additional_moves_beyond_one + 1
+        //We omit single-move games, because those may be found straightforwardly by brute-force
+        let additional_moves_beyond_two = geom_distr.sample(rng) as usize;
+        additional_moves_beyond_two + 2
     }
 
     pub fn generate_random_game_path<R : Rng + ?Sized>(&self, rng : &mut R) -> GamePath {

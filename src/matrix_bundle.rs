@@ -36,7 +36,7 @@ pub fn derive_orthonormal_basis_changes_from_target_matrices(target_matrices : &
     //This is actually really slow due to a combined pytorch+MAGMA bug
     //let (eigenvalues, eigenvectors) = symmetrized.linalg_eigh("U");
 
-    //Rows are eigenvectors
+    //Rows are eigenvectors after doing this, previously they were columns
     let eigenvectors = eigenvectors.transpose(1, 2);
 
     //Find permutation matrices to sort eigenvalues in descending order of absolute value
@@ -53,14 +53,16 @@ pub fn derive_orthonormal_basis_changes_from_target_matrices(target_matrices : &
     let Q_T = eigenvectors.shallow_clone();
     let Q = eigenvectors.transpose(1, 2);
 
-    //Finally, we need to resolve the * +-1 factor for each of the eigenvectors.
-    //We do this by trial-transforming the antisymmetric part, and then ensuring
-    //that all of the row-sums are positive
+    //Finally, we need to resolve the * +-1 factor for each of the eigenvectors (up to
+    //an overall multiplication by +-I)
+    //We do this by trial-transforming the target matrices, and then ensuring
+    //that all of the elements in the first row are non-negative.
     //N x M x M
-    let trial_transformed = Q_T.matmul(&antisymmetrized).matmul(&Q);
-    let trial_sums = trial_transformed.sum_dim_intlist(Some(&[2 as i64] as &[i64]), false, Kind::Float);
+    let trial_transformed = Q_T.matmul(&target_matrices).matmul(&Q);
     //N x M
-    let trial_signs = trial_sums.sign();
+    let trial_transformed_first_row = trial_transformed.i((.., 0, ..));
+    //N x M
+    let trial_signs = trial_transformed_first_row.sign();
     //Fix up the signs so that we map zeroes -> 1, so it's only -1/+1
     let trial_signs = (trial_signs + 0.5).sign();
     //Expand the trial signs to be the same size as the eigenvectors
@@ -69,10 +71,16 @@ pub fn derive_orthonormal_basis_changes_from_target_matrices(target_matrices : &
 
     //Use the trial signs to determine the orientation
     let eigenvectors = trial_signs * eigenvectors;
-    let Q_T = eigenvectors.shallow_clone();
     let Q = eigenvectors.transpose(1, 2);
 
     Q
+}
+
+/// Applies the orthonormal basis transforms given in Q to the given matrices,
+/// all of which are assumed to be N x M x M
+fn apply_orthonormal_basis_transform(Q : &Tensor, matrices : &Tensor) -> Tensor {
+    let Q_T = Q.transpose(1, 2); 
+    Q_T.matmul(matrices).matmul(Q)
 }
 
 impl MatrixBundle {
@@ -84,19 +92,18 @@ impl MatrixBundle {
             flattened_matrix_targets,
         }
     }
-    pub fn standardize(&self) -> Self {
+    /// Takes a collection of orthonormal basis-change matrices [dims N x M_sqrt x M_sqrt]
+    /// and applies the basis changes to each collection of matrices in this matrix bundle
+    pub fn apply_orthonormal_basis_transforms(&self, Q : &Tensor) -> Self {
         let n = self.get_num_playouts() as i64;
         let k = self.get_init_set_size() as i64;
-        let m = self.flattened_matrix_targets.size()[1];
+        let m = self.get_flattened_matrix_dim() as i64;
         let m_sqrt = (m as f64).sqrt() as i64;
+
         let reshaped_matrix_targets = self.flattened_matrix_targets.reshape(&[n, m_sqrt, m_sqrt]);
+        let transformed_matrix_targets = apply_orthonormal_basis_transform(Q, &reshaped_matrix_targets);
 
-        //N x M_sqrt x M_sqrt
-        let Q = derive_orthonormal_basis_changes_from_target_matrices(&reshaped_matrix_targets);
         let Q_T = Q.transpose(1, 2); 
-
-        let transformed_matrix_targets = Q_T.matmul(&reshaped_matrix_targets).matmul(&Q);
-
         let Q = Q.reshape(&[n, 1, m_sqrt, m_sqrt]);
         let Q_T = Q_T.reshape(&[n, 1, m_sqrt, m_sqrt]);
 
@@ -111,6 +118,15 @@ impl MatrixBundle {
             flattened_initial_matrix_sets,
             flattened_matrix_targets,
         }
+    }
+    pub fn standardize(&self) -> Self {
+        let n = self.get_num_playouts() as i64;
+        let m = self.get_flattened_matrix_dim() as i64;
+        let m_sqrt = (m as f64).sqrt() as i64;
+        let reshaped_matrix_targets = self.flattened_matrix_targets.reshape(&[n, m_sqrt, m_sqrt]);
+        //N x M_sqrt x M_sqrt
+        let Q = derive_orthonormal_basis_changes_from_target_matrices(&reshaped_matrix_targets);
+        self.apply_orthonormal_basis_transforms(&Q)
     }
     pub fn device(&self) -> Device {
         self.flattened_matrix_targets.device()
@@ -210,3 +226,44 @@ impl PlayoutBundleLike for MatrixBundle {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::generate;
+    #[test]
+    fn test_orthonormal_basis_invariance_of_standardization() {
+        let N = 10;
+        let M = 10;
+        let log_normal_std_dev = 1.0f64;
+        let device = tch::Device::Cuda(0);
+        
+        //Test that if we randomly rotate the basis for some random matrices,
+        //standardizing yields the same result as standardizing the original random matrices
+        let random_matrices = generate::random_log_normal_singular_value_matrices(N, M, log_normal_std_dev, device);
+
+        let standardizing_basis_changes = derive_orthonormal_basis_changes_from_target_matrices(&random_matrices);
+        let standardized_matrices = apply_orthonormal_basis_transform(&standardizing_basis_changes, &random_matrices);
+        println!("standardized matrices: {}", standardized_matrices.to_string(80).unwrap());
+        
+
+        let random_basis_changes = generate::random_orthogonal_matrices(N, M, device);
+        let randomized_matrices = apply_orthonormal_basis_transform(&random_basis_changes, &random_matrices);
+        
+        let restandardizing_basis_changes = derive_orthonormal_basis_changes_from_target_matrices(&randomized_matrices);
+        let restandardized_matrices = apply_orthonormal_basis_transform(&restandardizing_basis_changes, &randomized_matrices);
+
+        println!("restandardized matrices: {}", restandardized_matrices.to_string(80).unwrap());
+        
+        //Now, the restandardized matrices should be identical to the standardized ones
+        let diff = standardized_matrices - restandardized_matrices;
+        let diff_squared = &diff * &diff;
+        let total_diff_squared = f32::from(diff_squared.sum(Kind::Float));
+
+        println!("total squared diff: {}", total_diff_squared);
+        if (total_diff_squared > 0.01) {
+            panic!("Got different results for standard form after orthonormal basis transform!");
+        }
+    }
+}
+
