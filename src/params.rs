@@ -107,18 +107,6 @@ impl Params {
         (self.matrix_dim * self.matrix_dim).try_into().unwrap()
     }
 
-    /// Dims N X M X M
-    fn generate_random_orthogonal_matrices(&self, N : usize) -> Tensor {
-        generate::random_orthogonal_matrices(N, self.matrix_dim, self.get_device())
-    }
-
-    ///Dims N x M
-    fn generate_random_singular_values(&self, N : usize) -> Tensor {
-        let N = N as i64;
-        let M = self.matrix_dim as i64;
-        generate::random_log_normal(self.log_normal_std_dev, &[N, M], self.get_device())
-    }
-
     ///Dims N x M x M
     pub fn generate_random_matrices(&self, N : usize) -> Tensor {
         generate::random_log_normal_singular_value_matrices(N, self.matrix_dim, self.log_normal_std_dev, self.get_device())

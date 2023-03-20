@@ -131,10 +131,6 @@ impl VisitLogitMatrices {
     //Assuming the first dimension is the batch dimension, compute cross-entropy with logits
     //normalized by the number of samples in the batch.
     fn softmax_cross_entropy_with_logits(logits : &Tensor, target_policy : &Tensor) -> Tensor {
-
-        let min_logit_value = f64::from(logits.min());
-        let max_logit_value = f64::from(logits.max());
-
         let r = logits.size()[0];
         let total_size = logits.size().drain(..).fold(1, |a, b| a * b);
         let remainder_size = total_size / r;

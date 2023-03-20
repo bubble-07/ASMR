@@ -45,11 +45,6 @@ impl AnnotatedGamePath {
     }
 }
 
-pub fn apply_orthonormal_basis_change(matrices : Tensor, Q : Tensor) -> Tensor {
-    //Q.t().dot(matrices).dot(Q)
-    unimplemented!();
-}
-
 impl GamePathNode {
     pub fn annotate(self, child_visit_probabilities : Array2<f32>) -> AnnotatedGamePathNode {
         AnnotatedGamePathNode {

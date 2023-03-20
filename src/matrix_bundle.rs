@@ -21,14 +21,13 @@ fn remove(named_tensor_map : &mut HashMap<String, Tensor>, key : &str) -> Result
 /// N x M x M -> N x M x M
 pub fn derive_orthonormal_basis_changes_from_target_matrices(target_matrices : &Tensor) -> Tensor {
     let _guard = no_grad_guard();
-    let n = target_matrices.size()[0];
     let m = target_matrices.size()[1];
     //TODO: May want schur decomposition instead here,
     //or possibly a smarter algorithm which actually produces
     //the best dominant subspaces
     let transposed = target_matrices.transpose(1, 2);
     let symmetrized : Tensor = 0.5 * transposed + 0.5 * target_matrices;
-    let antisymmetrized = target_matrices - &symmetrized;
+
     //Eigenvalues are default-sorted ascending
     //eigenvalues : N x M, eigenvectors : N x M x M - cols are eigenvectors
     let (eigenvectors, eigenvalues, _) = Tensor::linalg_svd(&symmetrized, true, "gesvdj");
@@ -180,7 +179,7 @@ impl PlayoutBundleLike for MatrixBundle {
         let flattened_initial_matrix_sets = self.flattened_initial_matrix_sets.i(batch_index_range.clone())
                                             .to_device(device).detach();
 
-        let flattened_matrix_targets = self.flattened_matrix_targets.i(batch_index_range.clone())
+        let flattened_matrix_targets = self.flattened_matrix_targets.i(batch_index_range)
                                        .to_device(device).detach();
         Self {
             flattened_initial_matrix_sets,

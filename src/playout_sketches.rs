@@ -71,9 +71,6 @@ impl PlayoutSketchBundle {
     pub fn get_playout_length(&self) -> usize {
         self.left_matrix_indices.size()[1] as usize
     }
-    pub fn get_final_set_size(&self) -> usize {
-        self.get_init_set_size() + self.get_playout_length()
-    }
     fn concat_consume(a : Tensor, b : Tensor) -> Tensor {
         let result = Tensor::cat(&[a, b], 0);
         result

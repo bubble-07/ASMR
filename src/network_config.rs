@@ -67,9 +67,6 @@ impl NetworkConfig {
     ///followed by the global output embedding and output embeddings for each matrix
     ///in the initial matrix set
     pub fn get_main_net_outputs(&self, single_embeddings : &[Tensor]) -> (Vec<Tensor>, Tensor, Vec<Tensor>) {
-        let k_plus_one = single_embeddings.len();
-        let k = k_plus_one - 1;
-
         //Nx(K+1)xF
         let main_net_inputs = Tensor::stack(single_embeddings, 1);
 

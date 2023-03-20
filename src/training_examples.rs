@@ -81,7 +81,7 @@ impl PlayoutBundle {
         right_matrix_indices.reverse();
         //Roll forward the target-finding rollout 
         let playout_length = result.get_playout_length();
-        for i in 0..(playout_length - 1) {
+        for _ in 0..(playout_length - 1) {
             let left_indices = left_matrix_indices.pop().unwrap();
             let right_indices = right_matrix_indices.pop().unwrap();
             target_finding_rollout = target_finding_rollout.manual_step(&left_indices, &right_indices);
@@ -123,10 +123,6 @@ impl PlayoutBundle {
     }
     pub fn get_flattened_matrix_dim(&self) -> usize {
         self.matrix_bundle.get_flattened_matrix_dim()
-    }
-    fn concat_consume(a : Tensor, b : Tensor) -> Tensor {
-        let result = Tensor::cat(&[a, b], 0);
-        result
     }
 }
 impl PlayoutBundleLike for PlayoutBundle {
