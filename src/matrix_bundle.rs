@@ -3,6 +3,7 @@ use tch::{no_grad_guard, nn, nn::Init, nn::Module, Tensor, nn::Sequential, kind:
 use crate::synthetic_data::*;
 use std::collections::HashMap;
 use crate::training_examples::*;
+use crate::array_utils::*;
 use std::ops::Range;
 use std::iter::zip;
 
@@ -255,9 +256,7 @@ mod tests {
         println!("restandardized matrices: {}", restandardized_matrices.to_string(80).unwrap());
         
         //Now, the restandardized matrices should be identical to the standardized ones
-        let diff = standardized_matrices - restandardized_matrices;
-        let diff_squared = &diff * &diff;
-        let total_diff_squared = f32::from(diff_squared.sum(Kind::Float));
+        let total_diff_squared = tensor_diff_squared(&standardized_matrices, &restandardized_matrices);
 
         println!("total squared diff: {}", total_diff_squared);
         if (total_diff_squared > 0.01) {

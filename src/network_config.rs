@@ -1,7 +1,7 @@
 use tch::{no_grad_guard, nn, nn::Init, nn::Module, Tensor, nn::Path, nn::Sequential, kind::Kind,
           nn::Optimizer, IndexOp, Device, nn::VarStore};
 use crate::network::*;
-use crate::neural_utils::*;
+use crate::attention::*;
 use crate::validation_set::*;
 use crate::playout_sketches::*;
 use crate::array_utils::*;

@@ -1,7 +1,7 @@
 use tch::{nn, nn::Init, nn::linear, nn::Module, Tensor, nn::Path, nn::Sequential, nn::LinearConfig};
 use std::borrow::Borrow;
 use crate::params::*;
-use crate::neural_utils::*;
+use crate::attention::*;
 use crate::network_module::*;
 
 ///Module that takes a flattened matrix (dimension FLATTENED_MATRIX_DIM)

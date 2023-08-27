@@ -3,6 +3,7 @@
 #![allow(unused_imports)]
 #![allow(unused_parens)]
 
+mod matrix_sets;
 mod generate;
 mod matrix_bundle;
 mod validation_set;
@@ -21,7 +22,7 @@ mod rollout_states;
 mod normal_inverse_chi_squared;
 mod array_utils;
 mod params;
-mod neural_utils;
+mod attention;
 mod network;
 mod network_config;
 mod batch_split_training_examples;
@@ -615,9 +616,7 @@ fn gen_synthetic_training_data_file_command(params : &Params, training_data_outp
     (0..params.num_synthetic_training_games).into_par_iter()
     .map(|_| {
         let mut rng = rand::thread_rng();
-        let game_path = params.generate_random_game_path(&mut rng);
-        let annotated_game_path = game_path.annotate_path();
-
+        let annotated_game_path = params.generate_random_game_path(&mut rng);
         annotated_game_path
     })
     .for_each_with(sender.clone(), |s, x| {

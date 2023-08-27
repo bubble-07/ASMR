@@ -60,12 +60,12 @@ impl BatchSplitTrainingExamples<PlayoutSketchBundle> {
             if !batch_bundles_by_starting_set_size.contains_key(&init_set_size) {
                 batch_bundles_by_starting_set_size.insert(init_set_size, Vec::new());
             }
-            let mut entries = batch_bundles_by_starting_set_size.get_mut(&init_set_size).unwrap();
+            let entries = batch_bundles_by_starting_set_size.get_mut(&init_set_size).unwrap();
             entries.push((weight, playout_sketch_bundle_batch));
         }
 
         //Step 2: Loop through the different initial set sizes and generate matrices
-        batch_bundles_by_starting_set_size.into_iter().flat_map(move |(init_set_size, mut entries)| {
+        batch_bundles_by_starting_set_size.into_iter().flat_map(move |(init_set_size, entries)| {
             let num_matrices_by_entry : Vec<_> = entries.iter()
                                            .map(|(_, playout_sketch_bundle)| {
                                                (init_set_size * playout_sketch_bundle.get_num_playouts()) as i64

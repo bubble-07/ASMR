@@ -114,7 +114,8 @@ pub fn kaiming_uniform() -> init::Init {
     init::Init::Kaiming {
         dist : init::NormalOrUniform::Uniform,
         fan : init::FanInOut::FanIn,
-        non_linearity : init::NonLinearity::ReLU, //Not quite correct, but close 'nuff
+        non_linearity : init::NonLinearity::ExplicitGain(0.57735), //Maintaining previous init behavior
+        //non_linearity : init::NonLinearity::ReLU, //Not quite correct, but close 'nuff
     }
 }
 
@@ -248,5 +249,84 @@ impl Module for LinearResidual {
         let post_activation = pre_activation.leaky_relu();
         let post_weights = post_activation.linear(&self.second_ws, Option::Some(&self.second_bs));
         post_weights + xs
+    }
+}
+
+///Hadamard product bilinear mapping as a bimodule
+#[derive(Debug)]
+pub struct HadamardBilinearMap {
+    // Bias is irrelevant for these
+    pub left_linear_factor : SimpleLinear,
+    pub right_linear_factor : SimpleLinear,
+    pub left_linear_contrib : SimpleLinear,
+    pub right_linear_contrib : SimpleLinear,
+    // Because it's covered here
+    pub output_linear : SimpleLinear,
+}
+
+impl BiModule for HadamardBilinearMap {
+    fn forward(&self, xs: &Tensor, ys: &Tensor) -> Tensor {
+        let left_factor = self.left_linear_factor.forward(xs);
+        let right_factor = self.right_linear_factor.forward(ys);
+        let product = left_factor * right_factor;
+
+        let left_summand = self.left_linear_contrib.forward(xs);
+        let right_summand = self.right_linear_contrib.forward(ys);
+
+        let combined = product + left_summand + right_summand;
+        let result = self.output_linear.forward(&combined);
+        result
+    }
+}
+
+pub fn hadamard_bilinear<'a, T: Borrow<Path<'a>>>(network_path: T,
+                                                      in_out_dim: i64,
+                                                      c: LinearConfig) -> HadamardBilinearMap {
+    let network_path = network_path.borrow();
+
+    let unbiased_c = LinearConfig {
+        ws_init: c.ws_init.clone(),
+        bs_init: None,
+        bias: false,
+    };
+
+    let left_linear_factor = simple_linear(network_path / "left_linear_factor", in_out_dim, unbiased_c);
+    let right_linear_factor = simple_linear(network_path / "right_linear_factor", in_out_dim, unbiased_c);
+    let left_linear_contrib = simple_linear(network_path / "left_linear_contrib", in_out_dim, unbiased_c);
+    let right_linear_contrib = simple_linear(network_path / "right_linear_contrib", in_out_dim, unbiased_c);
+
+    let output_linear = simple_linear(network_path / "output_linear", in_out_dim, c);
+    
+    HadamardBilinearMap {
+        left_linear_factor,
+        right_linear_factor,
+        left_linear_contrib,
+        right_linear_contrib,
+        output_linear,
+    }
+}
+
+pub fn hadamard_bilinear_tweak<'a, T: Borrow<Path<'a>>>(network_path: T,
+                                                        base_hadamard_bilinear: &HadamardBilinearMap)
+                                                        -> HadamardBilinearMap {
+    let network_path = network_path.borrow();
+
+    let left_linear_factor = simple_linear_tweak(network_path / "left_linear_factor",
+                                                 &base_hadamard_bilinear.left_linear_factor);
+    let right_linear_factor = simple_linear_tweak(network_path / "right_linear_factor",
+                                                 &base_hadamard_bilinear.right_linear_factor);
+    let left_linear_contrib = simple_linear_tweak(network_path / "left_linear_contrib",
+                                                 &base_hadamard_bilinear.left_linear_contrib);
+    let right_linear_contrib = simple_linear_tweak(network_path / "right_linear_contrib",
+                                                 &base_hadamard_bilinear.right_linear_contrib);
+
+    let output_linear = simple_linear_tweak(network_path / "output_linear",
+                                            &base_hadamard_bilinear.output_linear);
+    HadamardBilinearMap {
+        left_linear_factor,
+        right_linear_factor,
+        left_linear_contrib,
+        right_linear_contrib,
+        output_linear,
     }
 }

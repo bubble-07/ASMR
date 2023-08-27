@@ -9,6 +9,13 @@ use std::convert::{TryFrom, TryInto};
 
 use tch::{kind::Kind, Tensor, Device};
 
+pub fn tensor_diff_squared(one : &Tensor, two : &Tensor) -> f32 {
+    let diff = one - two;
+    let diff_squared = &diff * &diff;
+    let total_diff_squared = f32::from(diff_squared.sum(Kind::Float));
+    total_diff_squared
+}
+
 pub fn generate_2d_index_tensor_span(num_matrices : i64, device : Device) -> (Tensor, Tensor) {
     let num_children = num_matrices * num_matrices;
 

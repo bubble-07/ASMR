@@ -1,7 +1,9 @@
 use tch::{nn, kind::Kind, nn::Init, nn::Module, Tensor, 
     nn::Path, nn::Sequential, nn::LinearConfig};
 use std::borrow::Borrow;
-use crate::network_module::{SimpleLinear, simple_linear, simple_linear_tweak, kaiming_uniform};
+use crate::network_module::{SimpleLinear, simple_linear, simple_linear_tweak, kaiming_uniform,
+                            hadamard_bilinear, hadamard_bilinear_tweak, HadamardBilinearMap,
+                            BiModule};
 use crate::params::*;
 use crate::peeling_states::*;
 use crate::tweakable_tensor::*;
@@ -110,7 +112,7 @@ impl ResidualAttentionStackWithGlobalTrack {
 #[derive(Debug)]
 pub struct PeelLayer {
     pub read_only_attention : BilinearSelfAttention,
-    pub pre_linear : SimpleLinear,
+    pub bilinear : HadamardBilinearMap,
     pub post_linear : SimpleLinear
 }
 
@@ -124,9 +126,10 @@ impl PeelLayer {
         let layer_normed = layer_norm(x);
         let (peel_track_state, after_attention) = 
             self.read_only_attention.peel_forward(peel_layer_state, &layer_normed);
-        let after_linear = self.pre_linear.forward(&x);
-        let sum = &after_linear + &after_attention;
-        let post_activation = sum.leaky_relu();
+
+        let combined = self.bilinear.forward(&x, &after_attention);
+
+        let post_activation = combined.leaky_relu();
         let output = self.post_linear.forward(&post_activation) + x;
         (peel_track_state, output)
     }
@@ -140,13 +143,13 @@ pub fn peel_layer<'a, T : Borrow<Path<'a>>>(network_path : T,
     let network_path = network_path.borrow();
     let read_only_attention = bilinear_self_attention_tweak(network_path / "read_only_attention",
                                                             &main_net_layer.bilinear_self_attention);
-    let pre_linear = simple_linear_tweak(network_path / "pre_linear",
-                                         &main_net_layer.pre_linear_general);
+    let bilinear = hadamard_bilinear_tweak(network_path / "bilinear",
+                                           &main_net_layer.bilinear_general);
     let post_linear = simple_linear_tweak(network_path / "post_linear",
                                           &main_net_layer.post_linear_general);
     PeelLayer {
         read_only_attention,
-        pre_linear,
+        bilinear,
         post_linear
     }
 }
@@ -164,8 +167,8 @@ pub fn peel_layer<'a, T : Borrow<Path<'a>>>(network_path : T,
 #[derive(Debug)]
 pub struct ResidualAttentionLayerWithGlobalTrack {
     pub bilinear_self_attention : BilinearSelfAttention,
-    pub pre_linear_general : SimpleLinear,
-    pub pre_linear_global : SimpleLinear,
+    pub bilinear_general : HadamardBilinearMap,
+    pub bilinear_global : HadamardBilinearMap,
     pub post_linear_general : SimpleLinear,
     pub post_linear_global : SimpleLinear
 }
@@ -213,16 +216,18 @@ impl ResidualAttentionLayerWithGlobalTrack {
         let leading_dim = n * (k - 1);
         let general_inputs = general_inputs.reshape(&[leading_dim, f]);
         let after_attention_general = after_attention_general.reshape(&[leading_dim, f]);
-        let after_linear = self.pre_linear_general.forward(&general_inputs);
-        let sum = &after_linear + after_attention_general;
-        let post_activation = sum.leaky_relu();
+
+        let combined = self.bilinear_general.forward(&general_inputs, &after_attention_general);
+
+        let post_activation = combined.leaky_relu();
         let general_outputs = self.post_linear_general.forward(&post_activation) + general_inputs;
 
         let general_outputs = general_outputs.reshape(&[n, k - 1, f]);
 
         //Derive the global output
-        let sum_global = &after_attention_global + &self.pre_linear_global.forward(&global_input);
-        let post_activation_global = sum_global.leaky_relu();
+        let combined_global = self.bilinear_global.forward(&global_input, &after_attention_global);
+
+        let post_activation_global = combined_global.leaky_relu();
         let output_global = self.post_linear_global.forward(&post_activation_global) + &global_input;
         let output_global = output_global.reshape(&[n, 1, f]);
 
@@ -236,10 +241,11 @@ pub fn residual_attention_layer_with_global_track<'a, T : Borrow<Path<'a>>>(netw
     let network_path = network_path.borrow();
     let bilinear_self_attention = bilinear_self_attention(network_path / "bilinear_self_attention", full_dimension);
 
-    let pre_linear_general = simple_linear(network_path / "pre_linear_general", 
-                                        full_dimension as i64, Default::default());
-    let pre_linear_global = simple_linear(network_path / "pre_linear_global",
-                                        full_dimension as i64, Default::default());
+    let bilinear_general = hadamard_bilinear(network_path / "bilinear_general",
+                                    full_dimension as i64, Default::default());
+
+    let bilinear_global = hadamard_bilinear(network_path / "bilinear_global",
+                                    full_dimension as i64, Default::default());
 
     //These are initialized to zero in the style of ReZero (normalization-free ResNets)
     let post_linear_config = LinearConfig {
@@ -255,8 +261,8 @@ pub fn residual_attention_layer_with_global_track<'a, T : Borrow<Path<'a>>>(netw
 
     ResidualAttentionLayerWithGlobalTrack {
         bilinear_self_attention,
-        pre_linear_general,
-        pre_linear_global,
+        bilinear_general,
+        bilinear_global,
         post_linear_general,
         post_linear_global
     }

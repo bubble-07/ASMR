@@ -113,8 +113,7 @@ impl Params {
     }
 
     pub fn generate_random_playout<R : Rng + ?Sized>(&self, rng : &mut R) -> PlayoutBundle {
-        let game_path = self.generate_random_game_path(rng);
-        let annotated_game_path = game_path.annotate_path();
+        let annotated_game_path = self.generate_random_game_path(rng);
         let playout_sketch_bundle = PlayoutSketchBundle::from_single_annotated_game_path(annotated_game_path); 
         let playout_bundle = PlayoutBundle::from_sketch_bundle(&self, playout_sketch_bundle);
         playout_bundle
@@ -137,11 +136,11 @@ impl Params {
         additional_moves_beyond_two + 2
     }
 
-    pub fn generate_random_game_path<R : Rng + ?Sized>(&self, rng : &mut R) -> GamePath {
+    pub fn generate_random_game_path<R : Rng + ?Sized>(&self, rng : &mut R) -> AnnotatedGamePath {
         let initial_set_size = self.generate_initial_set_size(rng);
         let ground_truth_num_moves = self.generate_ground_truth_num_moves(rng);
         
-        GamePath::generate_game_path(initial_set_size, ground_truth_num_moves, rng)
+        AnnotatedGamePath::generate_game_path(initial_set_size, ground_truth_num_moves, rng)
     }
 }
 //Random notes: Rubik's cube group, for instance, can have representations with matrix dimension ~20,

@@ -1,7 +1,7 @@
 use tch::{no_grad_guard, nn, nn::Init, nn::Module, Tensor, nn::Path, nn::Sequential, kind::Kind,
           nn::Optimizer, IndexOp, Device};
 use crate::network::*;
-use crate::neural_utils::*;
+use crate::attention::*;
 use crate::array_utils::*;
 use crate::params::*;
 use crate::training_examples::*;
@@ -228,7 +228,7 @@ impl NetworkRolloutState {
         let rollout_states_diff = self.rollout_states.perform_moves_diff(left_indices, right_indices);
 
         //Compute diff in input embeddings
-        let flattened_added_matrices = rollout_states_diff.get_flattened_added_matrices();
+        let flattened_added_matrices = rollout_states_diff.matrix_set_diff().get_flattened_added_matrices();
         let flattened_transformed_added_matrices = flattened_added_matrices.asinh().detach();
 
         //R x F
@@ -337,14 +337,12 @@ impl NetworkRolloutState {
     //From an initial rolloutstates - must not have made any turns yet!
     pub fn from_rollout_states(network_config : &NetworkConfig, rollout_states : RolloutStates)
         -> NetworkRolloutState {
-        let s = rollout_states.matrices.size();
-        let (r, k_plus_t, m, _) = (s[0], s[1], s[2], s[3]);
 
         //Using asinh for mapping due to having logarithmic growth
         //with respect to the absolute value of the argument, which is roughly
         //what we'd desire for normalizing the effects of repeated matrix multiplication
         let mut flattened_transformed_matrix_sets = rollout_states.matrices
-                                                .reshape(&[r, k_plus_t, m * m])
+                                                .get_flattened_matrices()
                                                 .asinh().detach()
                                                 .unbind(1);
         let transformed_flattened_targets = rollout_states.flattened_targets.asinh().detach();

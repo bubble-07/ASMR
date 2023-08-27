@@ -1,9 +1,9 @@
 use tch::{no_grad_guard, nn, nn::Init, nn::Module, Tensor, nn::Path, nn::Sequential, kind::Kind,
           nn::Optimizer, IndexOp, Device};
 use crate::network::*;
-use crate::neural_utils::*;
 use crate::array_utils::*;
 use crate::params::*;
+use crate::matrix_sets::*;
 use crate::training_examples::*;
 use crate::network_config::*;
 use ndarray::*;
@@ -28,7 +28,7 @@ pub struct RolloutStates {
 
     ///The matrices in each set, each of dims MxM, R x (k+t) of 'em
     ///R x (k + t) x M x M
-    pub matrices : Tensor,
+    pub matrices : MatrixSets,
 
     ///The remaining number of turns
     pub remaining_turns : usize,
@@ -37,7 +37,7 @@ pub struct RolloutStates {
 impl fmt::Display for RolloutStates {
     fn fmt(&self, f : &mut fmt::Formatter) -> fmt::Result {
         write!(f, "set: {} \n target: {} \n turns: {}", 
-               self.matrices.to_string(80).unwrap(), 
+               self.matrices, 
                self.flattened_targets.to_string(80).unwrap(), 
                self.remaining_turns)
     }
@@ -50,31 +50,29 @@ pub struct RolloutStatesDiff {
     pub min_distances : Tensor,
     ///The matrices which were added at this step
     ///R x 1 x M x M
-    pub matrices : Tensor,
+    pub matrix_set_diff : MatrixSetDiff,
 }
 
 impl fmt::Display for RolloutStatesDiff {
     fn fmt(&self, f : &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "added: {}", self.matrices.to_string(80).unwrap())
+        write!(f, "{}", self.matrix_set_diff)
     }
 }
 
 impl RolloutStatesDiff {
+    pub fn matrix_set_diff(&self) -> &MatrixSetDiff {
+        &self.matrix_set_diff
+    }
     pub fn split_to_singles(self) -> Vec<RolloutStatesDiff> {
         let min_distances = self.min_distances.split(1, 0);
-        let matrices = self.matrices.split(1, 0);
-        zip(min_distances, matrices)
-        .map(|(min_distances, matrices)| {
+        let matrix_set_diffs = self.matrix_set_diff.split_to_singles();
+        zip(min_distances, matrix_set_diffs)
+        .map(|(min_distances, matrix_set_diff)| {
             RolloutStatesDiff {
                 min_distances,
-                matrices
+                matrix_set_diff,
             }
         }).collect()
-    }
-    pub fn get_flattened_added_matrices(&self) -> Tensor {
-        let r = self.matrices.size()[0];
-        let m = self.matrices.size()[2];
-        self.matrices.reshape(&[r, m * m])
     }
 }
 
@@ -105,7 +103,7 @@ impl RolloutStates {
     }
     pub fn apply_diff(self, diff : &RolloutStatesDiff) -> Self {
         let remaining_turns = self.remaining_turns - 1;
-        let matrices = Tensor::concat(&[self.matrices, diff.matrices.shallow_clone()], 1);
+        let matrices = self.matrices.apply_diff(&diff.matrix_set_diff);
         RolloutStates {
             min_distances : diff.min_distances.shallow_clone(),
             flattened_targets : self.flattened_targets,
@@ -134,11 +132,11 @@ impl RolloutStates {
     pub fn merge(states : Vec<RolloutStates>) -> RolloutStates {
         let min_distances : Vec<Tensor> = states.iter().map(|x| x.min_distances.shallow_clone()).collect();
         let flattened_targets : Vec<Tensor> = states.iter().map(|x| x.flattened_targets.shallow_clone()).collect();
-        let matrices : Vec<Tensor> = states.iter().map(|x| x.matrices.shallow_clone()).collect();
+        let matrices : Vec<MatrixSets> = states.iter().map(|x| x.matrices.shallow_clone()).collect();
 
         let min_distances = Tensor::concat(&min_distances, 0);
         let flattened_targets = Tensor::concat(&flattened_targets, 0);
-        let matrices = Tensor::concat(&matrices, 0);
+        let matrices = MatrixSets::merge(matrices);
         
         let remaining_turns = states.iter().map(|x| x.remaining_turns).max().unwrap();
 
@@ -155,7 +153,7 @@ impl RolloutStates {
     pub fn split(self, split_sizes : &[i64]) -> Vec<RolloutStates> {
         let min_distances = self.min_distances.split_with_sizes(split_sizes, 0);
         let flattened_targets = self.flattened_targets.split_with_sizes(split_sizes, 0);
-        let matrices = self.matrices.split_with_sizes(split_sizes, 0);
+        let matrices = self.matrices.split(split_sizes);
         let remaining_turns = self.remaining_turns;
 
         zip(zip(min_distances, flattened_targets), matrices)
@@ -171,13 +169,13 @@ impl RolloutStates {
     }
 
     pub fn get_num_rollouts(&self) -> i64 {
-        self.matrices.size()[0]
+        self.matrices.get_num_sets()
     }
     pub fn get_matrix_size(&self) -> i64 {
-        self.matrices.size()[2]
+        self.matrices.get_matrix_size()
     }
     pub fn get_num_matrices(&self) -> i64 {
-        self.matrices.size()[1]
+        self.matrices.get_num_matrices()
     }
 
     fn expand_single_indices(&self, left_index : usize, right_index : usize) -> (Tensor, Tensor) {
@@ -209,31 +207,10 @@ impl RolloutStates {
     pub fn perform_moves_diff(&self, left_indices : &Tensor, right_indices : &Tensor) -> RolloutStatesDiff {
         let _guard = no_grad_guard();
 
-        let r = self.get_num_rollouts();
-        let m = self.get_matrix_size();
-
-        let left_indices = left_indices.reshape(&[r, 1, 1, 1]);
-        let right_indices = right_indices.reshape(&[r, 1, 1, 1]);
-
-        let expanded_shape = vec![r, 1, m, m];
-
-        let left_indices = left_indices.expand(&expanded_shape, false);
-        let right_indices = right_indices.expand(&expanded_shape, false);
-
-        //Gets the left/right matrices which were sampled for the next step in rollouts
-        //Dimensions R x M x M
-        let left_matrices = self.matrices.gather(1, &left_indices, false);
-        let right_matrices = self.matrices.gather(1, &right_indices, false);
-
-        let left_matrices = left_matrices.reshape(&[r, m, m]);
-        let right_matrices = right_matrices.reshape(&[r, m, m]);
-
-        //R x M x M
-        let added_matrices = left_matrices.matmul(&right_matrices);
-        let added_matrices = added_matrices.reshape(&[r, 1, m, m]);
+        let matrix_set_diff = self.matrices.perform_moves_diff(left_indices, right_indices);
 
         //R x (M * M)
-        let flattened_added_matrices = added_matrices.reshape(&[r, m * m]);
+        let flattened_added_matrices = matrix_set_diff.get_flattened_added_matrices();
 
         //R x (M * M)
         let differences = &self.flattened_targets - &flattened_added_matrices;
@@ -244,7 +221,7 @@ impl RolloutStates {
 
         RolloutStatesDiff {
             min_distances,
-            matrices : added_matrices,
+            matrix_set_diff,
         }
     }
 
@@ -270,6 +247,8 @@ impl RolloutStates {
         //N
         let (min_distances, _) = distances.min_dim(1, false);
 
+        let matrices = MatrixSets::new(matrices);
+
         RolloutStates {
             min_distances,
             flattened_targets,
@@ -282,7 +261,7 @@ impl RolloutStates {
     pub fn expand(self, R : usize) -> Self {
         let _guard = no_grad_guard();
 
-        let matrices = self.matrices.expand(&[R as i64, -1, -1, -1], false); 
+        let matrices = self.matrices.expand(R);
         let min_distances = self.min_distances.expand(&[R as i64], false);
         let flattened_targets = self.flattened_targets.expand(&[R as i64, -1], false);
         RolloutStates {

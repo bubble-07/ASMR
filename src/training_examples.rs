@@ -9,6 +9,7 @@ use crate::array_utils::*;
 use std::convert::{TryFrom, TryInto};
 use std::path::Path;
 use crate::params::*;
+use crate::matrix_sets::*;
 use crate::network_config::*;
 use crate::rollout_states::*;
 use crate::synthetic_data::*;
@@ -51,49 +52,27 @@ impl PlayoutBundle {
     ///collection of random initial matrices (dims (N*K) x sqrt(M) x sqrt(M))
     pub fn from_initial_matrices_and_sketch_bundle(initial_matrices : Tensor, sketch_bundle : PlayoutSketchBundle) -> Self {
         let num_playouts = sketch_bundle.get_num_playouts() as i64;
-        let flattened_matrix_dim = initial_matrices.size()[1] * initial_matrices.size()[2];
         let init_set_size = sketch_bundle.get_init_set_size() as i64;
+        let matrix_dim = initial_matrices.size()[1];
 
-        let flattened_initial_matrix_sets = initial_matrices.reshape(&[num_playouts, init_set_size, flattened_matrix_dim]);
+        let initial_matrices = initial_matrices.reshape(&[num_playouts, init_set_size, matrix_dim, matrix_dim]);
+        let initial_matrices = MatrixSets::new(initial_matrices);
 
-        //Generate some matrices of zeroes for an initial fake 'target'
-        //TODO: We could remove the need for extra computations here by adding an
-        //extra layer of abstraction around rollouts with targets vs rollouts without
-        let targets_dim = [num_playouts, flattened_matrix_dim];
-        let fake_targets = Tensor::zeros(&targets_dim, (Kind::Float, sketch_bundle.device()));
+        let flattened_matrix_targets = initial_matrices.get_flattened_targets_from_moves(
+                                    &sketch_bundle.left_matrix_indices,
+                                    &sketch_bundle.right_matrix_indices,
+                                );
+        let flattened_initial_matrix_sets = initial_matrices.get_flattened_matrices();
 
         let matrix_bundle = MatrixBundle {
             flattened_initial_matrix_sets,
-            flattened_matrix_targets : fake_targets,
+            flattened_matrix_targets,
         };
 
-        //We'll fix up the playout bundle's target, no worries
-        let mut result = PlayoutBundle {
+        PlayoutBundle {
             matrix_bundle,
             sketch_bundle,
-        };
-        let mut target_finding_rollout = RolloutStates::from_playout_bundle_initial_state(&result);
-
-        let mut left_matrix_indices = result.sketch_bundle.left_matrix_indices.unbind(1);
-        left_matrix_indices.reverse();
-
-        let mut right_matrix_indices = result.sketch_bundle.right_matrix_indices.unbind(1);
-        right_matrix_indices.reverse();
-        //Roll forward the target-finding rollout 
-        let playout_length = result.get_playout_length();
-        for _ in 0..(playout_length - 1) {
-            let left_indices = left_matrix_indices.pop().unwrap();
-            let right_indices = right_matrix_indices.pop().unwrap();
-            target_finding_rollout = target_finding_rollout.manual_step(&left_indices, &right_indices);
         }
-        //Perform the final step, for which we'll only need the diff
-        let left_indices = left_matrix_indices.pop().unwrap();
-        let right_indices = right_matrix_indices.pop().unwrap();
-        let final_step_diff = target_finding_rollout.perform_moves_diff(&left_indices, &right_indices);
-
-        result.matrix_bundle.flattened_matrix_targets = final_step_diff.matrices.reshape(&targets_dim);
-
-        result
     }
 
     ///Lifts a PlayoutSketchBundle to a PlayoutBundle by selecting random
